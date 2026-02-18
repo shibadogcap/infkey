@@ -30,8 +30,8 @@ jobs:
 
       - run: flutter pub get
 
-      # リポジトリ名がサブパスになるため --base-href を設定
-      - run: flutter build web --release --base-href /infkey/
+      # カスタムドメインを使用するため --base-href を / に設定
+      - run: flutter build web --release --base-href /
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
