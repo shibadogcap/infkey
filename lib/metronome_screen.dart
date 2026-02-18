@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math';
+import 'package:flutter/foundation.dart'; // Add this
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:torch_light/torch_light.dart';
@@ -63,10 +64,11 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
   }
 
   Future<void> _checkCapabilities() async {
+    if (kIsWeb) return; // Web では懐中電灯とバイブレーションを無効化
     try {
       final hasTorch = await TorchLight.isTorchAvailable();
       final hasVib   = await Vibration.hasVibrator();
-      if (mounted) setState(() { _hasTorch = hasTorch; _hasVibrator = hasVib; });
+      if (mounted) setState(() { _hasTorch = hasTorch; _hasVibrator = (hasVib == true); });
     } catch (_) {}
   }
 
@@ -84,7 +86,7 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
     if (t.hapticEnabled) {
       isDown ? HapticFeedback.heavyImpact() : HapticFeedback.lightImpact();
     }
-    if (t.vibrationEnabled && _hasVibrator) {
+    if (t.vibrationEnabled && _hasVibrator && !kIsWeb) {
       Vibration.vibrate(duration: isDown ? 60 : 25, amplitude: isDown ? 200 : 80);
     }
   }
@@ -94,12 +96,13 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
     final isDown = beat == 1;
     if (!t.muted) {
       if (t.soundEnabled)  AudioEngine().playClick(isDown, trackIndex: trackIndex);
-      if (t.flashEnabled && _hasTorch) _torchFlash(isDown);
+      if (t.flashEnabled && _hasTorch && !kIsWeb) _torchFlash(isDown);
       setState(() => t.currentBeat = beat);
     }
   }
 
   Future<void> _torchFlash(bool strong) async {
+    if (kIsWeb) return;
     try {
       await TorchLight.enableTorch();
       await Future.delayed(Duration(milliseconds: strong ? 50 : 25));
@@ -114,6 +117,9 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
       _b.engine.stop();
       setState(() { _isPlaying = false; _a.currentBeat = 0; _b.currentBeat = 0; });
     } else {
+      // Web 対策: ユーザー操作時に AudioEngine を初期化/再開
+      await AudioEngine().init();
+      
       _a.engine..bpm = _a.bpm..beatsPerMeasure = _a.beatsPerMeasure;
       _b.engine..bpm = _b.bpm..beatsPerMeasure = _b.beatsPerMeasure;
       await _a.engine.start();

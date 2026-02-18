@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:isolate';
+import 'package:flutter/foundation.dart';
 
 // ─── コマンド群 ───────────────────────────────────────────────
 
@@ -136,6 +137,10 @@ class MetronomeTrack {
   ReceivePort? _receivePort;
   bool _running = false;
 
+  // Web フォールバック用
+  Timer? _webTimer;
+  Timer? _webPreTimer;
+
   bool get isRunning => _running;
 
   MetronomeTrack({
@@ -145,6 +150,7 @@ class MetronomeTrack {
   });
 
   Future<void> _ensureIsolate() async {
+    if (kIsWeb) return; // Web では Isolate を使わない
     if (_isolate != null) return;
     _receivePort = ReceivePort();
     _isolate = await Isolate.spawn(_isolateEntry, _receivePort!.sendPort);
@@ -163,32 +169,69 @@ class MetronomeTrack {
 
   Future<void> start() async {
     if (_running) stop();
-    await _ensureIsolate();
-    _sendPort!.send(_CmdStart(bpm, beatsPerMeasure));
-    _running = true;
+    if (kIsWeb) {
+      _running = true;
+      _startWebTimer(0);
+    } else {
+      await _ensureIsolate();
+      _sendPort!.send(_CmdStart(bpm, beatsPerMeasure));
+      _running = true;
+    }
   }
 
   void stop() {
-    _sendPort?.send(const _CmdStop());
+    if (kIsWeb) {
+      _webTimer?.cancel();
+      _webPreTimer?.cancel();
+    } else {
+      _sendPort?.send(const _CmdStop());
+    }
     _running = false;
+  }
+
+  void _startWebTimer(int beatIndex) {
+    if (!_running) return;
+    final intervalMs = (60000 / bpm).round();
+
+    // preTick
+    _webPreTimer = Timer(Duration(milliseconds: intervalMs - preTickLeadMs), () {
+      if (!_running) return;
+      onPreTick?.call((beatIndex % beatsPerMeasure) + 1);
+    });
+
+    // Tick
+    _webTimer = Timer(Duration(milliseconds: intervalMs), () {
+      if (!_running) return;
+      onTick?.call((beatIndex % beatsPerMeasure) + 1);
+      _startWebTimer(beatIndex + 1);
+    });
   }
 
   void updateBpm(int newBpm) {
     bpm = newBpm;
-    _sendPort?.send(_CmdBpm(newBpm));
+    if (kIsWeb) {
+      // 次の周期から反映される（より正確な Web 実装は必要に応じて）
+    } else {
+      _sendPort?.send(_CmdBpm(newBpm));
+    }
   }
 
   void updateBeatsPerMeasure(int n) {
     beatsPerMeasure = n;
-    _sendPort?.send(_CmdBeats(n));
+    if (kIsWeb) {
+    } else {
+      _sendPort?.send(_CmdBeats(n));
+    }
   }
 
   void dispose() {
     stop();
-    _isolate?.kill(priority: Isolate.immediate);
-    _isolate = null;
-    _receivePort?.close();
-    _receivePort = null;
-    _sendPort = null;
+    if (!kIsWeb) {
+      _isolate?.kill(priority: Isolate.immediate);
+      _isolate = null;
+      _receivePort?.close();
+      _receivePort = null;
+      _sendPort = null;
+    }
   }
 }
