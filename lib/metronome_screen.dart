@@ -197,60 +197,66 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
   // ─── Build ───────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    return OrientationBuilder(builder: (ctx, orientation) {
-      final isLandscape = orientation == Orientation.landscape;
+    return LayoutBuilder(builder: (ctx, constraints) {
+      final isLandscape = constraints.maxWidth > constraints.maxHeight;
+      
+      double indicatorSize;
+      if (isLandscape) {
+        // 横画面: 幅に合わせてインジケーターサイズを調整
+        indicatorSize = (constraints.maxWidth - 240) / 2.2;
+        indicatorSize = indicatorSize.clamp(100.0, 160.0);
+      } else {
+        // 縦画面: 高さに合わせて調整
+        indicatorSize = (constraints.maxHeight - 320) / 2.2;
+        indicatorSize = indicatorSize.clamp(120.0, 160.0);
+      }
+
       return Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
-          child: isLandscape ? _buildLandscape() : _buildPortrait(),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          child: isLandscape ? _buildLandscape(indicatorSize) : _buildPortrait(indicatorSize),
         ),
       );
     });
   }
 
-  Widget _buildPortrait() {
+  Widget _buildPortrait(double indicatorSize) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _buildTrackPanel(_a, trackIndex: 0, indicatorSize: 160),
+        _buildTrackPanel(_a, trackIndex: 0, indicatorSize: indicatorSize),
         const SizedBox(height: 16),
         _buildDivider(horizontal: true),
         const SizedBox(height: 16),
-        _buildTrackPanel(_b, trackIndex: 1, indicatorSize: 160),
+        _buildTrackPanel(_b, trackIndex: 1, indicatorSize: indicatorSize),
         const SizedBox(height: 28),
         _buildStartStop(),
       ],
     );
   }
 
-  Widget _buildLandscape() {
-    return IntrinsicHeight(
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _buildTrackPanel(_a, trackIndex: 0, indicatorSize: 160),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            child: _buildDivider(horizontal: false),
-          ),
-          _buildTrackPanel(_b, trackIndex: 1, indicatorSize: 160),
-          const SizedBox(width: 20),
-          // Start/Stop: 右端に縦配置
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [_buildStartStop()],
-          ),
-        ],
-      ),
+  Widget _buildLandscape(double indicatorSize) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        _buildTrackPanel(_a, trackIndex: 0, indicatorSize: indicatorSize),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: _buildDivider(horizontal: false, length: indicatorSize * 1.2),
+        ),
+        _buildTrackPanel(_b, trackIndex: 1, indicatorSize: indicatorSize),
+        const SizedBox(width: 32),
+        _buildStartStop(),
+      ],
     );
   }
 
-  Widget _buildDivider({required bool horizontal}) {
+  Widget _buildDivider({required bool horizontal, double length = 180}) {
     const color = Color(0xFF43474e);
     return horizontal
-        ? Container(height: 1, width: 240, color: color)
-        : Container(width: 1, height: 180, color: color);
+        ? Container(height: 1, width: length * 1.5, color: color)
+        : Container(width: 1, height: length, color: color);
   }
 
   // ─── スタート/ストップ ────────────────────────────────────
@@ -316,15 +322,17 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
       children: [
         _toggle(Icons.volume_up,  'Sound',  t.soundEnabled,
             (v) => setState(() => t.soundEnabled = v)),
-        if (!kIsWeb || _hasVibrator)
+        // Web ではハプティック、バイブレーション、フラッシュを表示しない
+        if (!kIsWeb) ...[
           _toggle(Icons.vibration,  'Haptic', t.hapticEnabled,
               (v) => setState(() => t.hapticEnabled = v)),
-        if (_hasVibrator)
-          _toggle(Icons.sensors, 'Vibrate', t.vibrationEnabled,
-              (v) => setState(() => t.vibrationEnabled = v)),
-        if (_hasTorch)
-          _toggle(Icons.flash_on,  'Flash',  t.flashEnabled,
-              (v) => setState(() => t.flashEnabled = v)),
+          if (_hasVibrator)
+            _toggle(Icons.sensors, 'Vibrate', t.vibrationEnabled,
+                (v) => setState(() => t.vibrationEnabled = v)),
+          if (_hasTorch)
+            _toggle(Icons.flash_on,  'Flash',  t.flashEnabled,
+                (v) => setState(() => t.flashEnabled = v)),
+        ],
         // 仕切り代わりの細い線
         Container(width: 1, height: 36, color: const Color(0xFF43474e),
             margin: const EdgeInsets.symmetric(horizontal: 2)),

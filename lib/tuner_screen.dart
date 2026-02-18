@@ -5,83 +5,118 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:record/record.dart';
+import 'audio_engine.dart';
 
-// Top-level pitch detection (YIN algorithm) + RMS level
-// Returns [pitch_hz_or_nan, rms_level]
+// FFT & Pitch Detection
+// YIN よりも高速で Web/モバイル双方で安定した反応を目指す
+class PitchResult {
+  final double freq;
+  final double rms;
+  PitchResult(this.freq, this.rms);
+}
+
+// シンプルな FFT 実装 (Cooley-Tukey)
+// 2048 サンプル程度なら Dart でも十分に実用的
+class _FFT {
+  static void transform(List<double> re, List<double> im) {
+    final n = re.length;
+    if (n <= 1) return;
+
+    // Bit-reversal permutation
+    for (int i = 1, j = 0; i < n; i++) {
+      int bit = n >> 1;
+      for (; (j & bit) != 0; bit >>= 1) {
+        j ^= bit;
+      }
+      j ^= bit;
+      if (i < j) {
+        final tempRe = re[i]; re[i] = re[j]; re[j] = tempRe;
+        final tempIm = im[i]; im[i] = im[j]; im[j] = tempIm;
+      }
+    }
+
+    // Iterative FFT
+    for (int len = 2; len <= n; len <<= 1) {
+      double ang = 2 * pi / len;
+      double wlenRe = cos(ang);
+      double wlenIm = sin(ang);
+      for (int i = 0; i < n; i += len) {
+        double wRe = 1;
+        double wIm = 0;
+        for (int j = 0; j < len / 2; j++) {
+          final uRe = re[i + j];
+          final uIm = im[i + j];
+          final vRe = re[i + j + len ~/ 2] * wRe - im[i + j + len ~/ 2] * wIm;
+          final vIm = re[i + j + len ~/ 2] * wIm + im[i + j + len ~/ 2] * wRe;
+          re[i + j] = uRe + vRe;
+          im[i + j] = uIm + vIm;
+          re[i + j + len ~/ 2] = uRe - vRe;
+          im[i + j + len ~/ 2] = uIm - vIm;
+          final nextWRe = wRe * wlenRe - wIm * wlenIm;
+          wIm = wRe * wlenIm + wIm * wlenRe;
+          wRe = nextWRe;
+        }
+      }
+    }
+  }
+}
+
+// HPS (Harmonic Product Spectrum) によるピッチ検出
+// 倍音成分を考慮するため、単純なピーク検出より楽器に向いている
 List<double> detectPitch(List<double> samples) {
-  const sampleRate = 22050;
+  const sampleRate = 44100; // 録音側の設定とあわせる
   final n = samples.length;
-  final halfN = n ~/ 2;
 
-  // RMS レベル計算
   double rms = 0;
   for (final s in samples) {
     rms += s * s;
   }
   rms = sqrt(rms / n);
+  // より小さい音でも反応するようにしきい値を下げる（0.005 -> 0.001 = -60dB）
+  if (rms < 0.001) return [double.nan, rms];
 
-  if (rms < 0.008) return [double.nan, rms];
+  final re = List<double>.from(samples);
+  final im = List<double>.filled(n, 0.0);
 
-  // YIN: difference function d[tau]
-  final d = List<double>.filled(halfN, 0.0);
-  for (int tau = 1; tau < halfN; tau++) {
-    for (int i = 0; i < halfN; i++) {
-      final diff = samples[i] - samples[i + tau];
-      d[tau] += diff * diff;
+  // 窓関数 (Hamming)
+  for (int i = 0; i < n; i++) {
+    re[i] *= 0.54 - 0.46 * cos(2 * pi * i / (n - 1));
+  }
+
+  _FFT.transform(re, im);
+
+  final mag = List<double>.filled(n ~/ 2, 0.0);
+  for (int i = 0; i < n ~/ 2; i++) {
+    mag[i] = sqrt(re[i] * re[i] + im[i] * im[i]);
+  }
+
+  // HPS: ダウンサンプリングしたスペクトルを乗算
+  final hps = List<double>.from(mag);
+  const harmonics = 3;
+  for (int h = 2; h <= harmonics; h++) {
+    for (int i = 0; i < n ~/ (2 * h); i++) {
+      hps[i] *= mag[i * h];
     }
   }
 
-  // Cumulative mean normalized difference function
-  final cmnd = List<double>.filled(halfN, 1.0);
-  double runningSum = 0;
-  for (int tau = 1; tau < halfN; tau++) {
-    runningSum += d[tau];
-    cmnd[tau] = runningSum == 0 ? 0 : d[tau] * tau / runningSum;
+  // 低周波ノイズ（80Hz以下）を無視
+  final minBin = (80 * n / sampleRate).floor();
+  int maxIdx = minBin;
+  for (int i = minBin; i < n ~/ 4; i++) {
+    if (hps[i] > hps[maxIdx]) maxIdx = i;
   }
 
-  const minLag = 15;  // ~1470 Hz max @ 22050
-  final maxLag = (sampleRate / 60).clamp(0, halfN - 2).toInt();
-  const threshold = 0.12;
-
-  // 閾値を下回る最初の谷を探す
-  int bestTau = -1;
-  for (int tau = minLag; tau <= maxLag; tau++) {
-    if (cmnd[tau] < threshold) {
-      // ローカル最小まで進む
-      while (tau + 1 <= maxLag && cmnd[tau + 1] < cmnd[tau]) {
-        tau++;
-      }
-      bestTau = tau;
-      break;
-    }
+  // 二次補間でより正確な周波数を推定
+  double freq = maxIdx * sampleRate / n;
+  if (maxIdx > 0 && maxIdx < n ~/ 2 - 1) {
+    final y1 = hps[maxIdx - 1];
+    final y2 = hps[maxIdx];
+    final y3 = hps[maxIdx + 1];
+    final p = (y3 - y1) / (2 * (2 * y2 - y1 - y3));
+    freq = (maxIdx + p) * sampleRate / n;
   }
 
-  // 閾値を超えない場合はグローバル最小
-  if (bestTau == -1) {
-    double minVal = double.infinity;
-    for (int tau = minLag; tau <= maxLag; tau++) {
-      if (cmnd[tau] < minVal) {
-        minVal = cmnd[tau];
-        bestTau = tau;
-      }
-    }
-    if (minVal > 0.35) return [double.nan, rms];
-  }
-
-  // 放物線補間でサブサンプル精度を上げる
-  double refinedTau = bestTau.toDouble();
-  if (bestTau > 0 && bestTau < halfN - 1) {
-    final s0 = cmnd[bestTau - 1];
-    final s1 = cmnd[bestTau];
-    final s2 = cmnd[bestTau + 1];
-    final denom = 2 * (2 * s1 - s2 - s0);
-    if (denom.abs() > 1e-10) {
-      refinedTau = bestTau + (s2 - s0) / denom;
-    }
-  }
-
-  if (refinedTau <= 0) return [double.nan, rms];
-  return [sampleRate / refinedTau, rms];
+  return [freq, rms];
 }
 
 class TunerScreen extends StatefulWidget {
@@ -93,7 +128,7 @@ class TunerScreen extends StatefulWidget {
 }
 
 class _TunerScreenState extends State<TunerScreen> {
-  static const _sampleRate = 22050;
+  static const _sampleRate = 44100; // サンプリングレートを上げる（精度向上）
   static const _bufferSize = 2048;
   static const _noteNames = [
     'C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B',
@@ -116,14 +151,16 @@ class _TunerScreenState extends State<TunerScreen> {
   int _a4Ref = 440;
 
   final List<double> _freqHistory = [];
-  static const _historySize = 2;
+  static const _historySize = 5; // ヒストリーを少し増やして安定化
   int _silenceCounter = 0;
-  static const _silenceThreshold = 3;
+  static const _silenceThreshold = 2; // 沈黙判定を早める
 
-  bool _computing = false;  // prevent overlapping isolate calls
+  bool _computing = false;
   bool _wasInTune = false;
 
-  double _rmsLevel = 0.0; // マイクレベル (0.0〜1.0)
+  double _rmsLevel = 0.0;
+  bool _isPlayingRef = false; // お手本音を再生中か
+  double _lastCents = 0.0; // 針の振れを抑えるための移動平均用
 
   @override
   void initState() {
@@ -135,15 +172,14 @@ class _TunerScreenState extends State<TunerScreen> {
   void didUpdateWidget(TunerScreen old) {
     super.didUpdateWidget(old);
     if (widget.isActive && !old.isActive) {
-      // 画面が表示された
       if (_hasPermission) {
         _startListening();
       } else {
         _checkAndStart();
       }
     } else if (!widget.isActive && old.isActive) {
-      // 画面が非表示になった
       _stopListening();
+      if (_isPlayingRef) _toggleRefTone();
     }
   }
 
@@ -151,7 +187,19 @@ class _TunerScreenState extends State<TunerScreen> {
   void dispose() {
     _sub?.cancel();
     _recorder.stop().then((_) => _recorder.dispose());
+    AudioEngine().stopReferenceTone(); // お手本音を止める
     super.dispose();
+  }
+
+  Future<void> _toggleRefTone() async {
+    if (_isPlayingRef) {
+      await AudioEngine().stopReferenceTone();
+      if (mounted) setState(() => _isPlayingRef = false);
+    } else {
+      // お手本音を鳴らす際も、チューナー（マイク）を止めないように変更
+      await AudioEngine().startReferenceTone(_a4Ref.toDouble());
+      if (mounted) setState(() => _isPlayingRef = true);
+    }
   }
 
   Future<void> _stopListening() async {
@@ -162,6 +210,7 @@ class _TunerScreenState extends State<TunerScreen> {
     _buf.clear();
     _freqHistory.clear();
     _computing = false;
+    _lastCents = 0.0;
     if (mounted) {
       setState(() {
         _isRunning = false;
@@ -193,6 +242,9 @@ class _TunerScreenState extends State<TunerScreen> {
           encoder: AudioEncoder.pcm16bits,
           sampleRate: _sampleRate,
           numChannels: 1,
+          autoGain: false,      // 生音のため無効化
+          echoCancel: false,    // エコーキャンセル無効化
+          noiseSuppress: false, // ノイズ抑制無効化
         ),
       );
       _sub = stream.listen(_onData);
@@ -203,30 +255,44 @@ class _TunerScreenState extends State<TunerScreen> {
   }
 
   void _onData(Uint8List data) {
+    if (!_isRunning) return;
+
     for (int i = 0; i + 1 < data.length; i += 2) {
       int s = data[i] | (data[i + 1] << 8);
       if (s >= 32768) s -= 65536;
       _buf.add(s / 32768.0);
     }
+
+    // ラグ対策：バッファがたまりすぎていたら古いデータを捨てる
+    // 2回分以上たまっている場合は、最新の1回分だけ残す
+    if (_buf.length > _bufferSize * 2) {
+      _buf.removeRange(0, _buf.length - _bufferSize);
+    }
+
     if (_buf.length >= _bufferSize && !_computing) {
       final chunk = List<double>.from(_buf.take(_bufferSize));
-      _buf.removeRange(0, _bufferSize ~/ 4); // 1/4スライド → 更新頻度2倍
+      // 50%オーバーラップで更新頻度を確保
+      _buf.removeRange(0, _bufferSize ~/ 2);
+      
       _computing = true;
-      compute(detectPitch, chunk).then((result) {
-        _computing = false;
-        final freq = result[0].isNaN ? null : result[0];
-        final rms  = result[1];
-        _updateDisplay(freq, rms);
-      });
+      // Isolateのオーバーヘッドによるラグを避けるため、メインスレッドで計算
+      // FFT 2048 は十分に高速（数ミリ秒）なので UI をブロックしません
+      final result = detectPitch(chunk);
+      _computing = false;
+      _updateDisplay(result[0].isNaN ? null : result[0], result[1]);
     }
   }
 
   void _updateDisplay(double? freq, double rms) {
     if (!mounted) return;
-    // RMSレベルは常に更新（対数スケール、-40dB〜0dB を 0〜1 にマップ）
-    final dbLevel = rms > 0 ? (20 * log(rms) / ln10).clamp(-40.0, 0.0) : -40.0;
-    final level = ((dbLevel + 40) / 40).clamp(0.0, 1.0);
-    if (freq == null) {
+    
+    // マイクレベルの感度を大幅に上げる
+    // -60dB (0.001) 〜 0dB (1.0) の範囲にする
+    final dbLevel = rms > 0 ? (20 * log(rms) / ln10).clamp(-60.0, 0.0) : -60.0;
+    // 表示上のレベル (0.0 〜 1.0)
+    final level = ((dbLevel + 60) / 60).clamp(0.0, 1.0);
+    
+    if (freq == null || rms < 0.001) { // しきい値を下げて小さな音も拾う
       _silenceCounter++;
       if (_silenceCounter >= _silenceThreshold) {
         _freqHistory.clear();
@@ -244,14 +310,28 @@ class _TunerScreenState extends State<TunerScreen> {
     _silenceCounter = 0;
     _freqHistory.add(freq);
     if (_freqHistory.length > _historySize) _freqHistory.removeAt(0);
+    
+    // 中央値で外れ値を除去
     final sorted = List<double>.from(_freqHistory)..sort();
-    final smoothed = sorted[sorted.length ~/ 2];
-    final info = _freqToNote(smoothed);
+    final smoothedFreq = sorted[sorted.length ~/ 2];
+    
+    final info = _freqToNote(smoothedFreq);
+    
+    // セント値の動きを滑らかにする（指数移動平均）
+    // 前回のノートと同じであれば、急激な変化（ノイズ）を抑制する
+    double currentCents = info.$3.toDouble();
+    if (_noteName == info.$1) {
+      // アルファ値: 0.3 (重み付け。値を小さくすると滑らかになるが反応が鈍る)
+      _lastCents = _lastCents * 0.7 + currentCents * 0.3;
+    } else {
+      _lastCents = currentCents;
+    }
+
     setState(() {
-      _freq = smoothed;
+      _freq = smoothedFreq;
       _noteName = info.$1;
       _octave = info.$2;
-      _cents = info.$3;
+      _cents = _lastCents.round();
       _rmsLevel = level;
     });
     // Haptic when transitioning to in-tune
@@ -300,38 +380,80 @@ class _TunerScreenState extends State<TunerScreen> {
         ),
       );
     }
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _buildNoteCircle(),
-            const SizedBox(height: 40),
-            _buildCentsMeter(),
-            const SizedBox(height: 12),
-            AnimatedOpacity(
-              opacity: _freq != null ? 1.0 : 0.0,
-              duration: const Duration(milliseconds: 300),
-              child: Text(
-                _freq != null ? '${_freq!.toStringAsFixed(1)} Hz' : '',
-                style: const TextStyle(fontSize: 13, color: Colors.white38),
-              ),
+
+    return LayoutBuilder(builder: (context, constraints) {
+      final isLandscape = constraints.maxWidth > constraints.maxHeight;
+
+      if (isLandscape) {
+        final factor = (constraints.maxHeight / 380).clamp(0.6, 1.0);
+        return Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                _buildNoteCircle(160 * factor),
+                const SizedBox(width: 32),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildCentsMeter(240 * factor),
+                    const SizedBox(height: 12),
+                    AnimatedOpacity(
+                      opacity: _freq != null ? 1.0 : 0.0,
+                      duration: const Duration(milliseconds: 300),
+                      child: Text(
+                        _freq != null ? '${_freq!.toStringAsFixed(1)} Hz' : '',
+                        style: const TextStyle(fontSize: 13, color: Colors.white38),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _buildMicLevel(180 * factor),
+                    const SizedBox(height: 12),
+                    _buildA4Pill(),
+                  ],
+                ),
+              ],
             ),
-            const SizedBox(height: 16),
-            _buildMicLevel(),
-            const SizedBox(height: 16),
-            _buildA4Pill(),
-          ],
+          ),
+        );
+      }
+
+      // 縦画面
+      final factor = (constraints.maxWidth / 400).clamp(0.7, 1.0);
+      return Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildNoteCircle(180 * factor),
+              SizedBox(height: 32 * factor),
+              _buildCentsMeter(260 * factor),
+              const SizedBox(height: 12),
+              AnimatedOpacity(
+                opacity: _freq != null ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 300),
+                child: Text(
+                  _freq != null ? '${_freq!.toStringAsFixed(1)} Hz' : '',
+                  style: const TextStyle(fontSize: 13, color: Colors.white38),
+                ),
+              ),
+              const SizedBox(height: 16),
+              _buildMicLevel(200 * factor),
+              const SizedBox(height: 16),
+              _buildA4Pill(),
+            ],
+          ),
         ),
-      ),
-    );
+      );
+    });
   }
 
   // ─── マイクレベルメーター ──────────────────────────────
-  Widget _buildMicLevel() {
+  Widget _buildMicLevel(double barW) {
     // _rmsLevel: 0.0 (無音) 〜 1.0 (最大)
-    const barW = 200.0;
     const barH = 6.0;
     // 3ゾーンで色を変える: 低→緑、中→黄、高→赤
     Color barColor;
@@ -389,7 +511,7 @@ class _TunerScreenState extends State<TunerScreen> {
   // ─── A4基準周波数ピル ─────────────────────────────────
   Widget _buildA4Pill() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: const Color(0xFF2a2e33),
         borderRadius: BorderRadius.circular(28),
@@ -404,8 +526,10 @@ class _TunerScreenState extends State<TunerScreen> {
                   fontSize: 9,
                   fontWeight: FontWeight.bold)),
           const SizedBox(width: 8),
-          _buildA4Btn(Icons.remove,
-              () => setState(() => _a4Ref = (_a4Ref - 1).clamp(410, 480))),
+          _buildA4Btn(Icons.remove, () {
+            setState(() => _a4Ref = (_a4Ref - 1).clamp(410, 480));
+            if (_isPlayingRef) AudioEngine().startReferenceTone(_a4Ref.toDouble());
+          }),
           GestureDetector(
             onTap: _showA4Dialog,
             child: SizedBox(
@@ -423,11 +547,31 @@ class _TunerScreenState extends State<TunerScreen> {
               ),
             ),
           ),
-          _buildA4Btn(Icons.add,
-              () => setState(() => _a4Ref = (_a4Ref + 1).clamp(410, 480))),
+          _buildA4Btn(Icons.add, () {
+            setState(() => _a4Ref = (_a4Ref + 1).clamp(410, 480));
+            if (_isPlayingRef) AudioEngine().startReferenceTone(_a4Ref.toDouble());
+          }),
           const SizedBox(width: 6),
           const Text('Hz',
               style: TextStyle(color: Colors.white38, fontSize: 9)),
+          const SizedBox(width: 8),
+          // お手本音ボタン
+          GestureDetector(
+            onTap: _toggleRefTone,
+            child: Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: _isPlayingRef ? const Color(0xFF3a4e6e) : Colors.transparent,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                _isPlayingRef ? Icons.volume_up : Icons.volume_mute,
+                size: 18,
+                color: _isPlayingRef ? const Color(0xFFd0e4ff) : Colors.white30,
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -461,7 +605,10 @@ class _TunerScreenState extends State<TunerScreen> {
           decoration: const InputDecoration(hintText: '410 ~ 480 Hz'),
           onSubmitted: (s) {
             final v = int.tryParse(s);
-            if (v != null) setState(() => _a4Ref = v.clamp(410, 480));
+            if (v != null) {
+              setState(() => _a4Ref = v.clamp(410, 480));
+              if (_isPlayingRef) AudioEngine().startReferenceTone(_a4Ref.toDouble());
+            }
             Navigator.of(ctx).pop();
           },
         ),
@@ -472,7 +619,10 @@ class _TunerScreenState extends State<TunerScreen> {
           TextButton(
             onPressed: () {
               final v = int.tryParse(ctrl.text);
-              if (v != null) setState(() => _a4Ref = v.clamp(410, 480));
+              if (v != null) {
+                setState(() => _a4Ref = v.clamp(410, 480));
+                if (_isPlayingRef) AudioEngine().startReferenceTone(_a4Ref.toDouble());
+              }
               Navigator.of(ctx).pop();
             },
             child: const Text('OK'),
@@ -482,14 +632,14 @@ class _TunerScreenState extends State<TunerScreen> {
     );
   }
 
-  Widget _buildNoteCircle() {
+  Widget _buildNoteCircle(double size) {
     final inTune = _noteName != '--' && _cents.abs() <= 5;
     final color = inTune ? Colors.greenAccent : const Color(0xFFd0e4ff);
     final borderColor = inTune ? Colors.greenAccent : const Color(0xFF43474e);
     return AnimatedContainer(
       duration: const Duration(milliseconds: 180),
-      width: 180,
-      height: 180,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         border: Border.all(color: borderColor, width: 3),
@@ -498,7 +648,7 @@ class _TunerScreenState extends State<TunerScreen> {
       child: _noteName == '--'
           ? Icon(
               _isRunning ? Icons.mic : Icons.mic_none,
-              size: 56,
+              size: size * 0.3,
               color: const Color(0xFF43474e),
             )
           : Column(
@@ -507,7 +657,7 @@ class _TunerScreenState extends State<TunerScreen> {
                 Text(
                   _noteName,
                   style: TextStyle(
-                    fontSize: 60,
+                    fontSize: size * 0.33,
                     fontWeight: FontWeight.bold,
                     color: color,
                     height: 1.0,
@@ -517,7 +667,7 @@ class _TunerScreenState extends State<TunerScreen> {
                 Text(
                   '$_octave',
                   style: TextStyle(
-                    fontSize: 22,
+                    fontSize: size * 0.12,
                     color: color.withAlpha(180),
                     fontWeight: FontWeight.w500,
                   ),
@@ -527,7 +677,7 @@ class _TunerScreenState extends State<TunerScreen> {
     );
   }
 
-  Widget _buildCentsMeter() {
+  Widget _buildCentsMeter(double width) {
     final normalized = _noteName == '--'
         ? 0.5
         : (_cents.clamp(-50, 50) + 50) / 100.0;
@@ -535,7 +685,7 @@ class _TunerScreenState extends State<TunerScreen> {
     return Column(
       children: [
         SizedBox(
-          width: 260,
+          width: width,
           height: 48,
           child: CustomPaint(
             painter: _CentsMeterPainter(normalized, inTune),
@@ -544,16 +694,16 @@ class _TunerScreenState extends State<TunerScreen> {
         const SizedBox(height: 6),
         Row(
           mainAxisSize: MainAxisSize.min,
-          children: const [
-            Text('♭', style: TextStyle(color: Colors.white38, fontSize: 18)),
-            SizedBox(width: 100),
-            Text('♯', style: TextStyle(color: Colors.white38, fontSize: 18)),
+          children: [
+            const Text('♭', style: TextStyle(color: Colors.white38, fontSize: 18)),
+            SizedBox(width: width * 0.4),
+            const Text('♯', style: TextStyle(color: Colors.white38, fontSize: 18)),
           ],
         ),
         const SizedBox(height: 4),
         Text(
           _noteName == '--'
-              ? '音を鳴らしてください'
+              ? ''
               : '${_cents >= 0 ? '+' : ''}$_cents cent',
           style: const TextStyle(fontSize: 12, color: Colors.white38),
         ),

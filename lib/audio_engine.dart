@@ -68,6 +68,10 @@ class AudioEngine {
     }
   }
 
+  // チューナーお手本用
+  AudioSource? _refToneSource;
+  SoundHandle? _refToneHandle;
+
   // テスト用: 440Hz ビープ音を1秒鳴らす
   Future<void> playTestTone() async {
     await init();
@@ -79,6 +83,33 @@ class AudioEngine {
       await _soloud.stop(handle);
       await _soloud.disposeSource(source);
     } catch (_) {}
+  }
+
+  // お手本の音を鳴らす
+  Future<void> startReferenceTone(double frequency) async {
+    await init();
+    if (_refToneHandle != null) await stopReferenceTone();
+
+    _refToneSource = await _soloud.loadWaveform(WaveForm.sin, false, 0.25, 0);
+    if (_refToneSource != null) {
+      _soloud.setWaveformFreq(_refToneSource!, frequency);
+      _refToneHandle = await _soloud.play(_refToneSource!, volume: 0.3);
+    }
+  }
+
+  Future<void> stopReferenceTone() async {
+    if (_refToneHandle != null) {
+      try {
+        await _soloud.stop(_refToneHandle!);
+      } catch (_) {}
+      _refToneHandle = null;
+    }
+    if (_refToneSource != null) {
+      try {
+        await _soloud.disposeSource(_refToneSource!);
+      } catch (_) {}
+      _refToneSource = null;
+    }
   }
 
   // メトロノームクリック音を鳴らす（同期 fire-and-forget）
