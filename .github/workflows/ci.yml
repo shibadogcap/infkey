@@ -18,15 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get Flutter version from .fvmrc
-        id: fvm
-        run: |
-          flutter_version=$(jq -r '.flutter' .fvmrc)
-          echo "version=${flutter_version}" >> "$GITHUB_OUTPUT"
-
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ steps.fvm.outputs.version }}
           channel: stable
           cache: true
 
@@ -53,15 +46,8 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Get Flutter version from .fvmrc
-        id: fvm
-        run: |
-          flutter_version=$(jq -r '.flutter' .fvmrc)
-          echo "version=${flutter_version}" >> "$GITHUB_OUTPUT"
-
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ steps.fvm.outputs.version }}
           channel: stable
           cache: true
 
