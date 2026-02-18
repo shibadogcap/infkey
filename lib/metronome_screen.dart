@@ -64,11 +64,18 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
   }
 
   Future<void> _checkCapabilities() async {
-    if (kIsWeb) return; // Web では懐中電灯とバイブレーションを無効化
     try {
-      final hasTorch = await TorchLight.isTorchAvailable();
-      final hasVib   = await Vibration.hasVibrator();
-      if (mounted) setState(() { _hasTorch = hasTorch; _hasVibrator = (hasVib == true); });
+      final hasVib = await Vibration.hasVibrator();
+      bool hasTorch = false;
+      if (!kIsWeb) {
+        hasTorch = await TorchLight.isTorchAvailable();
+      }
+      if (mounted) {
+        setState(() {
+          _hasTorch = hasTorch;
+          _hasVibrator = (hasVib == true);
+        });
+      }
     } catch (_) {}
   }
 
@@ -309,13 +316,15 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
       children: [
         _toggle(Icons.volume_up,  'Sound',  t.soundEnabled,
             (v) => setState(() => t.soundEnabled = v)),
-        _toggle(Icons.vibration,  'Haptic', t.hapticEnabled,
-            (v) => setState(() => t.hapticEnabled = v)),
+        if (!kIsWeb || _hasVibrator)
+          _toggle(Icons.vibration,  'Haptic', t.hapticEnabled,
+              (v) => setState(() => t.hapticEnabled = v)),
         if (_hasVibrator)
           _toggle(Icons.sensors, 'Vibrate', t.vibrationEnabled,
               (v) => setState(() => t.vibrationEnabled = v)),
-        _toggle(Icons.flash_on,  'Flash',  t.flashEnabled,
-            (v) => setState(() => t.flashEnabled = v)),
+        if (_hasTorch)
+          _toggle(Icons.flash_on,  'Flash',  t.flashEnabled,
+              (v) => setState(() => t.flashEnabled = v)),
         // 仕切り代わりの細い線
         Container(width: 1, height: 36, color: const Color(0xFF43474e),
             margin: const EdgeInsets.symmetric(horizontal: 2)),
