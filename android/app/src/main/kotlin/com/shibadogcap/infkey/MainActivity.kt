@@ -1,4 +1,4 @@
-package com.example.infkey
+package com.shibadogcap.infkey
 
 import io.flutter.embedding.android.FlutterActivity
 
