@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ─────────────────────────────────────────────
+  # 静的解析・テスト
+  # ─────────────────────────────────────────────
+  analyze_and_test:
+    name: Analyze & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Flutter version from .fvmrc
+        id: fvm
+        run: |
+          flutter_version=$(jq -r '.flutter' .fvmrc)
+          echo "version=${flutter_version}" >> "$GITHUB_OUTPUT"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.fvm.outputs.version }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  # ─────────────────────────────────────────────
+  # Android APK ビルド
+  # ─────────────────────────────────────────────
+  build_android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    needs: analyze_and_test
+    # main へのプッシュ or タグ時のみ実行
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Get Flutter version from .fvmrc
+        id: fvm
+        run: |
+          flutter_version=$(jq -r '.flutter' .fvmrc)
+          echo "version=${flutter_version}" >> "$GITHUB_OUTPUT"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.fvm.outputs.version }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: infkey-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # GitHub Release への APK 添付（タグ時のみ）
+  # ─────────────────────────────────────────────
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build_android
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: infkey-release-apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app-release.apk
+          generate_release_notes: true
