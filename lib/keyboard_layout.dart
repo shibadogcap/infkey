@@ -87,43 +87,90 @@ class _KeyboardLayoutState extends State<KeyboardLayout> {
     return -1;
   }
 
-  Color _getWhiteKeyColor(bool active) {
-    if (active) return _getActiveColor();
+  Color _getLabelColor(ColorScheme colorScheme) {
+    if (widget.type == 'melody') {
+      return colorScheme.onSurface.withValues(alpha: 0.4);
+    }
+    final isDark = colorScheme.brightness == Brightness.dark;
+    // ダークモードでは白鍵=白なので、ラベルは暗い色で表示する
+    return isDark
+        ? Colors.black.withValues(alpha: 0.55)
+        : colorScheme.onSurface.withValues(alpha: 0.55);
+  }
+
+  Color _getWhiteKeyColor(bool active, ColorScheme colorScheme) {
+    if (active) return _getActiveColor(colorScheme);
+    final isDark = colorScheme.brightness == Brightness.dark;
+    if (isDark) {
+      switch (widget.type) {
+        case 'aug': return const Color(0xFF7A5950);  // 彩度と明るさをさらに向上（茶）
+        case 'dim': return const Color(0xFF59507A);  // 彩度と明るさをさらに向上（紫）
+        case 'min': return const Color(0xFF50597A);  // 彩度と明るさをさらに向上（青）
+        case 'maj': return const Color(0xFF7A5059);  // 彩度と明るさをさらに向上（桃）
+        case 'melody': return Colors.white;
+        default: return Colors.white;
+      }
+    }
     switch (widget.type) {
-      case 'aug': return const Color(0xFF5d4037);
-      case 'dim': return const Color(0xFF4a4458);
-      case 'min': return const Color(0xFF3f4759);
-      case 'maj': return const Color(0xFF5a3f47);
-      case 'melody': return const Color(0xFFe2e2e6);
+      case 'aug': return const Color(0xFFefebe9);
+      case 'dim': return const Color(0xFFf3e5f5);
+      case 'min': return const Color(0xFFe3f2fd);
+      case 'maj': return const Color(0xFFfce4ec);
+      case 'melody': return Colors.white;
       default: return Colors.white;
     }
   }
 
-  Color _getBlackKeyColor(bool active) {
-    if (active) return _getActiveColor();
+  Color _getBlackKeyColor(bool active, ColorScheme colorScheme) {
+    if (active) return _getActiveColor(colorScheme);
+    final isDark = colorScheme.brightness == Brightness.dark;
+    if (isDark) {
+      switch (widget.type) {
+        case 'aug': return const Color(0xFF4D3833); 
+        case 'dim': return const Color(0xFF38334D);
+        case 'min': return const Color(0xFF333B4D);
+        case 'maj': return const Color(0xFF4D3338);
+        case 'melody': return Colors.black;
+        default: return Colors.black;
+      }
+    }
     switch (widget.type) {
-      case 'aug': return const Color(0xFF3e2723);
-      case 'dim': return const Color(0xFF332d41);
-      case 'min': return const Color(0xFF2e3546);
-      case 'maj': return const Color(0xFF442a32);
-      case 'melody': return const Color(0xFF1a1c1e);
-      default: return Colors.black;
+      case 'aug': return const Color(0xFFd7ccc8);
+      case 'dim': return const Color(0xFFe1bee7);
+      case 'min': return const Color(0xFFbbdefb);
+      case 'maj': return const Color(0xFFf8bbd0);
+      case 'melody': return colorScheme.onSurface;
+      default: return colorScheme.onSurface;
     }
   }
 
-  Color _getActiveColor() {
+  Color _getActiveColor(ColorScheme colorScheme) {
+    final isDark = colorScheme.brightness == Brightness.dark;
+    if (isDark) {
+      // ダークモード: 押したときはもう少し鮮やかに
+      switch (widget.type) {
+        case 'aug': return const Color(0xFF6D4C41); 
+        case 'dim': return const Color(0xFF512DA8);
+        case 'min': return const Color(0xFF1976D2);
+        case 'maj': return const Color(0xFFC2185B);
+        case 'melody': return colorScheme.primary;
+        default: return colorScheme.primary;
+      }
+    }
+    // ライトモード
     switch (widget.type) {
-      case 'aug': return const Color(0xFFffb5a0);
-      case 'dim': return const Color(0xFFd0bcff);
-      case 'min': return const Color(0xFFa8c7ff);
-      case 'maj': return const Color(0xFFffb2be);
-      case 'melody': return const Color(0xFFd0e4ff);
-      default: return Colors.blue;
+      case 'aug': return const Color(0xFFd84315);
+      case 'dim': return const Color(0xFF673ab7);
+      case 'min': return const Color(0xFF1976d2);
+      case 'maj': return const Color(0xFFe91e63);
+      case 'melody': return colorScheme.primary;
+      default: return colorScheme.primary;
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     return LayoutBuilder(builder: (context, constraints) {
       double width = constraints.maxWidth;
       double height = constraints.maxHeight; // Use provided height constraints
@@ -147,13 +194,12 @@ class _KeyboardLayoutState extends State<KeyboardLayout> {
                   width: whiteKeyWidth,
                   height: height,
                   decoration: BoxDecoration(
-                    color: _getWhiteKeyColor(active),
-                    border: Border(right: BorderSide(color: Colors.black.withValues(alpha: 0.05))),
+                    color: _getWhiteKeyColor(active, colorScheme),
                   ),
                 );
               }),
             ),
-            // Black keys
+            // Black keys without border
             ...blackKeyPositions.entries.map((entry) {
               int note = entry.key;
               double left = entry.value * whiteKeyWidth;
@@ -161,22 +207,17 @@ class _KeyboardLayoutState extends State<KeyboardLayout> {
               return Positioned(
                 left: left,
                 top: 0,
-                child: Container(
-                  width: blackKeyWidth,
-                  height: height * 0.6,
-                  decoration: BoxDecoration(
-                    color: _getBlackKeyColor(active),
-                    borderRadius: const BorderRadius.only(
-                      bottomLeft: Radius.circular(6),
-                      bottomRight: Radius.circular(6),
+                child: ClipRRect(
+                  borderRadius: const BorderRadius.only(
+                    bottomLeft: Radius.circular(6),
+                    bottomRight: Radius.circular(6),
+                  ),
+                  child: Container(
+                    width: blackKeyWidth,
+                    height: height * 0.6,
+                    decoration: BoxDecoration(
+                      color: _getBlackKeyColor(active, colorScheme),
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.3),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
-                      )
-                    ],
                   ),
                 ),
               );
@@ -184,7 +225,7 @@ class _KeyboardLayoutState extends State<KeyboardLayout> {
             // Label
             Positioned(
               left: 12,
-              top: height / 2 - 10, // Approximate centering logic 
+              top: height / 2 - 10,
               child: IgnorePointer(
                 child: Text(
                   widget.label,
@@ -192,7 +233,7 @@ class _KeyboardLayoutState extends State<KeyboardLayout> {
                     fontSize: 10,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 1.5,
-                    color: widget.type == 'melody' ? const Color(0xFF1a1c1e) : Colors.white.withValues(alpha: 0.6),
+                    color: _getLabelColor(colorScheme),
                   ),
                 ),
               ),

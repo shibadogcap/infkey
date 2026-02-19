@@ -5,123 +5,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:record/record.dart';
+import 'package:pitch_detector_dart/pitch_detector.dart';
 import 'audio_engine.dart';
-
-// FFT & Pitch Detection
-// YIN よりも高速で Web/モバイル双方で安定した反応を目指す
-class PitchResult {
-  final double freq;
-  final double rms;
-  PitchResult(this.freq, this.rms);
-}
-
-// シンプルな FFT 実装 (Cooley-Tukey)
-// 2048 サンプル程度なら Dart でも十分に実用的
-class _FFT {
-  static void transform(List<double> re, List<double> im) {
-    final n = re.length;
-    if (n <= 1) return;
-
-    // Bit-reversal permutation
-    for (int i = 1, j = 0; i < n; i++) {
-      int bit = n >> 1;
-      for (; (j & bit) != 0; bit >>= 1) {
-        j ^= bit;
-      }
-      j ^= bit;
-      if (i < j) {
-        final tempRe = re[i]; re[i] = re[j]; re[j] = tempRe;
-        final tempIm = im[i]; im[i] = im[j]; im[j] = tempIm;
-      }
-    }
-
-    // Iterative FFT
-    for (int len = 2; len <= n; len <<= 1) {
-      double ang = 2 * pi / len;
-      double wlenRe = cos(ang);
-      double wlenIm = sin(ang);
-      for (int i = 0; i < n; i += len) {
-        double wRe = 1;
-        double wIm = 0;
-        for (int j = 0; j < len / 2; j++) {
-          final uRe = re[i + j];
-          final uIm = im[i + j];
-          final vRe = re[i + j + len ~/ 2] * wRe - im[i + j + len ~/ 2] * wIm;
-          final vIm = re[i + j + len ~/ 2] * wIm + im[i + j + len ~/ 2] * wRe;
-          re[i + j] = uRe + vRe;
-          im[i + j] = uIm + vIm;
-          re[i + j + len ~/ 2] = uRe - vRe;
-          im[i + j + len ~/ 2] = uIm - vIm;
-          final nextWRe = wRe * wlenRe - wIm * wlenIm;
-          wIm = wRe * wlenIm + wIm * wlenRe;
-          wRe = nextWRe;
-        }
-      }
-    }
-  }
-}
-
-// HPS (Harmonic Product Spectrum) によるピッチ検出
-// 倍音成分を考慮するため、単純なピーク検出より楽器に向いている
-List<double> detectPitch(List<double> samples) {
-  const sampleRate = 44100; // 録音側の設定とあわせる
-  final n = samples.length;
-
-  double rms = 0;
-  for (final s in samples) {
-    rms += s * s;
-  }
-  rms = sqrt(rms / n);
-  // より小さい音でも反応するようにしきい値を下げる（0.005 -> 0.001 = -60dB）
-  if (rms < 0.001) return [double.nan, rms];
-
-  final re = List<double>.from(samples);
-  final im = List<double>.filled(n, 0.0);
-
-  // 窓関数 (Hamming)
-  for (int i = 0; i < n; i++) {
-    re[i] *= 0.54 - 0.46 * cos(2 * pi * i / (n - 1));
-  }
-
-  _FFT.transform(re, im);
-
-  final mag = List<double>.filled(n ~/ 2, 0.0);
-  for (int i = 0; i < n ~/ 2; i++) {
-    mag[i] = sqrt(re[i] * re[i] + im[i] * im[i]);
-  }
-
-  // HPS: ダウンサンプリングしたスペクトルを乗算
-  final hps = List<double>.from(mag);
-  const harmonics = 3;
-  for (int h = 2; h <= harmonics; h++) {
-    for (int i = 0; i < n ~/ (2 * h); i++) {
-      hps[i] *= mag[i * h];
-    }
-  }
-
-  // 低周波ノイズ（80Hz以下）を無視
-  final minBin = (80 * n / sampleRate).floor();
-  int maxIdx = minBin;
-  for (int i = minBin; i < n ~/ 4; i++) {
-    if (hps[i] > hps[maxIdx]) maxIdx = i;
-  }
-
-  // 二次補間でより正確な周波数を推定
-  double freq = maxIdx * sampleRate / n;
-  if (maxIdx > 0 && maxIdx < n ~/ 2 - 1) {
-    final y1 = hps[maxIdx - 1];
-    final y2 = hps[maxIdx];
-    final y3 = hps[maxIdx + 1];
-    final p = (y3 - y1) / (2 * (2 * y2 - y1 - y3));
-    freq = (maxIdx + p) * sampleRate / n;
-  }
-
-  return [freq, rms];
-}
+import 'settings_manager.dart';
+import 'l10n.dart';
+import 'main.dart';
 
 class TunerScreen extends StatefulWidget {
-  final bool isActive;
-  const TunerScreen({super.key, this.isActive = true});
+  final ValueListenable<bool> isActive;
+  const TunerScreen({super.key, required this.isActive});
 
   @override
   State<TunerScreen> createState() => _TunerScreenState();
@@ -137,6 +29,12 @@ class _TunerScreenState extends State<TunerScreen> {
   final _recorder = AudioRecorder();
   StreamSubscription<Uint8List>? _sub;
   final List<double> _buf = [];
+  late final PitchDetector _pitchDetector = PitchDetector(
+    audioSampleRate: _sampleRate.toDouble(),
+    bufferSize: _bufferSize,
+  );
+  final _settings = SettingsManager();
+  final _l10n = L10n();
 
   bool _hasPermission = false;
   bool _isRunning = false;
@@ -146,9 +44,6 @@ class _TunerScreenState extends State<TunerScreen> {
   int _octave = 4;
   int _cents = 0;
   double? _freq;
-
-  // A4 reference frequency (Hz)
-  int _a4Ref = 440;
 
   final List<double> _freqHistory = [];
   static const _historySize = 5; // ヒストリーを少し増やして安定化
@@ -165,26 +60,36 @@ class _TunerScreenState extends State<TunerScreen> {
   @override
   void initState() {
     super.initState();
-    if (widget.isActive) _checkAndStart();
+    widget.isActive.addListener(_onActiveChanged);
+    if (widget.isActive.value) _checkAndStart();
   }
 
-  @override
-  void didUpdateWidget(TunerScreen old) {
-    super.didUpdateWidget(old);
-    if (widget.isActive && !old.isActive) {
+  void _onActiveChanged() {
+    if (widget.isActive.value) {
       if (_hasPermission) {
         _startListening();
       } else {
         _checkAndStart();
       }
-    } else if (!widget.isActive && old.isActive) {
+    } else {
       _stopListening();
       if (_isPlayingRef) _toggleRefTone();
     }
   }
 
   @override
+  void didUpdateWidget(TunerScreen old) {
+    super.didUpdateWidget(old);
+    if (widget.isActive != old.isActive) {
+      old.isActive.removeListener(_onActiveChanged);
+      widget.isActive.addListener(_onActiveChanged);
+      _onActiveChanged();
+    }
+  }
+
+  @override
   void dispose() {
+    widget.isActive.removeListener(_onActiveChanged);
     _sub?.cancel();
     _recorder.stop().then((_) => _recorder.dispose());
     AudioEngine().stopReferenceTone(); // お手本音を止める
@@ -197,7 +102,7 @@ class _TunerScreenState extends State<TunerScreen> {
       if (mounted) setState(() => _isPlayingRef = false);
     } else {
       // お手本音を鳴らす際も、チューナー（マイク）を止めないように変更
-      await AudioEngine().startReferenceTone(_a4Ref.toDouble());
+      await AudioEngine().startReferenceTone(_settings.a4Ref.toDouble(), volume: _settings.refVolume);
       if (mounted) setState(() => _isPlayingRef = true);
     }
   }
@@ -254,17 +159,17 @@ class _TunerScreenState extends State<TunerScreen> {
     }
   }
 
-  void _onData(Uint8List data) {
+  Future<void> _onData(Uint8List data) async {
     if (!_isRunning) return;
 
     for (int i = 0; i + 1 < data.length; i += 2) {
       int s = data[i] | (data[i + 1] << 8);
       if (s >= 32768) s -= 65536;
-      _buf.add(s / 32768.0);
+      // Gain を適用して感度を調整可能にする
+      _buf.add((s / 32768.0) * _settings.micGain);
     }
 
     // ラグ対策：バッファがたまりすぎていたら古いデータを捨てる
-    // 2回分以上たまっている場合は、最新の1回分だけ残す
     if (_buf.length > _bufferSize * 2) {
       _buf.removeRange(0, _buf.length - _bufferSize);
     }
@@ -275,11 +180,20 @@ class _TunerScreenState extends State<TunerScreen> {
       _buf.removeRange(0, _bufferSize ~/ 2);
       
       _computing = true;
-      // Isolateのオーバーヘッドによるラグを避けるため、メインスレッドで計算
-      // FFT 2048 は十分に高速（数ミリ秒）なので UI をブロックしません
-      final result = detectPitch(chunk);
+      
+      // RMSを計算（マイクレベル表示用）
+      double sum = 0;
+      for (final s in chunk) {
+        sum += s * s;
+      }
+      final rms = sqrt(sum / chunk.length);
+
+      final result = await _pitchDetector.getPitchFromFloatBuffer(chunk);
       _computing = false;
-      _updateDisplay(result[0].isNaN ? null : result[0], result[1]);
+      
+      // 期待される確度以上の場合のみ周波数を採用
+      final freq = (result.probability > 0.4) ? result.pitch : -1.0;
+      _updateDisplay(freq < 0 ? null : freq, rms);
     }
   }
 
@@ -341,7 +255,7 @@ class _TunerScreenState extends State<TunerScreen> {
   }
 
   (String, int, int) _freqToNote(double freq) {
-    final semitones = 12 * log(freq / _a4Ref) / ln2;
+    final semitones = 12 * log(freq / _settings.a4Ref) / ln2;
     final rounded = semitones.round();
     final cents = ((semitones - rounded) * 100).round().clamp(-50, 50);
     final midi = 69 + rounded;
@@ -352,6 +266,7 @@ class _TunerScreenState extends State<TunerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -362,18 +277,18 @@ class _TunerScreenState extends State<TunerScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.mic_off, size: 64, color: Colors.white38),
+              Icon(Icons.mic_off, size: 64, color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4)),
               const SizedBox(height: 20),
-              const Text(
-                'マイクへのアクセスが必要です',
-                style: TextStyle(color: Colors.white70, fontSize: 16),
+              Text(
+                _l10n.tr('tuner_mic_required'),
+                style: TextStyle(color: colorScheme.onSurfaceVariant, fontSize: 16),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 24),
               FilledButton.icon(
                 onPressed: _checkAndStart,
                 icon: const Icon(Icons.mic),
-                label: const Text('許可する'),
+                label: Text(_l10n.tr('tuner_mic_allow')),
               ),
             ],
           ),
@@ -405,7 +320,7 @@ class _TunerScreenState extends State<TunerScreen> {
                       duration: const Duration(milliseconds: 300),
                       child: Text(
                         _freq != null ? '${_freq!.toStringAsFixed(1)} Hz' : '',
-                        style: const TextStyle(fontSize: 13, color: Colors.white38),
+                        style: TextStyle(fontSize: 13, color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5)),
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -437,7 +352,7 @@ class _TunerScreenState extends State<TunerScreen> {
                 duration: const Duration(milliseconds: 300),
                 child: Text(
                   _freq != null ? '${_freq!.toStringAsFixed(1)} Hz' : '',
-                  style: const TextStyle(fontSize: 13, color: Colors.white38),
+                  style: TextStyle(fontSize: 13, color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5)),
                 ),
               ),
               const SizedBox(height: 16),
@@ -453,16 +368,17 @@ class _TunerScreenState extends State<TunerScreen> {
 
   // ─── マイクレベルメーター ──────────────────────────────
   Widget _buildMicLevel(double barW) {
+    final colorScheme = Theme.of(context).colorScheme;
     // _rmsLevel: 0.0 (無音) 〜 1.0 (最大)
     const barH = 6.0;
     // 3ゾーンで色を変える: 低→緑、中→黄、高→赤
     Color barColor;
     if (_rmsLevel < 0.6) {
-      barColor = const Color(0xFF4caf50);
+      barColor = Colors.green;
     } else if (_rmsLevel < 0.85) {
-      barColor = const Color(0xFFffb300);
+      barColor = Colors.orange;
     } else {
-      barColor = const Color(0xFFef5350);
+      barColor = Colors.red;
     }
     return Column(
       children: [
@@ -472,7 +388,7 @@ class _TunerScreenState extends State<TunerScreen> {
             Icon(
               _isRunning ? Icons.mic : Icons.mic_none,
               size: 13,
-              color: Colors.white38,
+              color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
             ),
             const SizedBox(width: 6),
             SizedBox(
@@ -482,7 +398,7 @@ class _TunerScreenState extends State<TunerScreen> {
                 borderRadius: BorderRadius.circular(barH / 2),
                 child: Stack(
                   children: [
-                    Container(color: const Color(0xFF2a2e33)),
+                    Container(color: colorScheme.surfaceContainerHighest),
                     FractionallySizedBox(
                       widthFactor: _rmsLevel,
                       child: AnimatedContainer(
@@ -502,7 +418,7 @@ class _TunerScreenState extends State<TunerScreen> {
         const SizedBox(height: 2),
         Text(
           _isRunning ? 'MIC' : '',
-          style: const TextStyle(fontSize: 9, color: Colors.white24),
+          style: TextStyle(fontSize: 9, color: colorScheme.onSurfaceVariant.withValues(alpha: 0.3)),
         ),
       ],
     );
@@ -510,50 +426,53 @@ class _TunerScreenState extends State<TunerScreen> {
 
   // ─── A4基準周波数ピル ─────────────────────────────────
   Widget _buildA4Pill() {
+    final colorScheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: const Color(0xFF2a2e33),
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(28),
-        border: Border.all(color: const Color(0xFF43474e)),
+        border: Border.all(color: colorScheme.outlineVariant),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Text('A4',
+          Text('A4',
               style: TextStyle(
-                  color: Colors.white70,
+                  color: colorScheme.onSurfaceVariant,
                   fontSize: 9,
                   fontWeight: FontWeight.bold)),
           const SizedBox(width: 8),
           _buildA4Btn(Icons.remove, () {
-            setState(() => _a4Ref = (_a4Ref - 1).clamp(410, 480));
-            if (_isPlayingRef) AudioEngine().startReferenceTone(_a4Ref.toDouble());
+            setState(() => _settings.a4Ref = (_settings.a4Ref - 1).clamp(410, 480));
+            if (_isPlayingRef) AudioEngine().startReferenceTone(_settings.a4Ref.toDouble(), volume: _settings.refVolume);
+            InfKeyApp.of(context).rebuild();
           }),
           GestureDetector(
             onTap: _showA4Dialog,
             child: SizedBox(
               width: 36,
               child: Text(
-                '$_a4Ref',
+                '${_settings.a4Ref}',
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white,
+                style: TextStyle(
+                  color: colorScheme.primary,
                   fontWeight: FontWeight.bold,
                   fontSize: 13,
                   decoration: TextDecoration.underline,
-                  decorationColor: Colors.white38,
+                  decorationColor: colorScheme.primary.withValues(alpha: 0.3),
                 ),
               ),
             ),
           ),
           _buildA4Btn(Icons.add, () {
-            setState(() => _a4Ref = (_a4Ref + 1).clamp(410, 480));
-            if (_isPlayingRef) AudioEngine().startReferenceTone(_a4Ref.toDouble());
+            setState(() => _settings.a4Ref = (_settings.a4Ref + 1).clamp(410, 480));
+            if (_isPlayingRef) AudioEngine().startReferenceTone(_settings.a4Ref.toDouble(), volume: _settings.refVolume);
+            InfKeyApp.of(context).rebuild();
           }),
           const SizedBox(width: 6),
-          const Text('Hz',
-              style: TextStyle(color: Colors.white38, fontSize: 9)),
+          Text('Hz',
+              style: TextStyle(color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5), fontSize: 9)),
           const SizedBox(width: 8),
           // お手本音ボタン
           GestureDetector(
@@ -562,13 +481,13 @@ class _TunerScreenState extends State<TunerScreen> {
               width: 32,
               height: 32,
               decoration: BoxDecoration(
-                color: _isPlayingRef ? const Color(0xFF3a4e6e) : Colors.transparent,
+                color: _isPlayingRef ? colorScheme.primaryContainer : Colors.transparent,
                 shape: BoxShape.circle,
               ),
               child: Icon(
                 _isPlayingRef ? Icons.volume_up : Icons.volume_mute,
                 size: 18,
-                color: _isPlayingRef ? const Color(0xFFd0e4ff) : Colors.white30,
+                color: _isPlayingRef ? colorScheme.onPrimaryContainer : colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
               ),
             ),
           ),
@@ -578,22 +497,23 @@ class _TunerScreenState extends State<TunerScreen> {
   }
 
   Widget _buildA4Btn(IconData icon, VoidCallback onTap) {
+    final colorScheme = Theme.of(context).colorScheme;
     return GestureDetector(
       onTap: onTap,
       child: Container(
         width: 28,
         height: 28,
-        decoration: const BoxDecoration(
-          color: Color(0xFFd0e4ff),
+        decoration: BoxDecoration(
+          color: colorScheme.secondaryContainer,
           shape: BoxShape.circle,
         ),
-        child: Icon(icon, size: 14, color: const Color(0xFF003258)),
+        child: Icon(icon, size: 14, color: colorScheme.onSecondaryContainer),
       ),
     );
   }
 
   Future<void> _showA4Dialog() async {
-    final ctrl = TextEditingController(text: '$_a4Ref');
+    final ctrl = TextEditingController(text: '${_settings.a4Ref}');
     await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -606,8 +526,9 @@ class _TunerScreenState extends State<TunerScreen> {
           onSubmitted: (s) {
             final v = int.tryParse(s);
             if (v != null) {
-              setState(() => _a4Ref = v.clamp(410, 480));
-              if (_isPlayingRef) AudioEngine().startReferenceTone(_a4Ref.toDouble());
+              setState(() => _settings.a4Ref = v.clamp(410, 480));
+              if (_isPlayingRef) AudioEngine().startReferenceTone(_settings.a4Ref.toDouble(), volume: _settings.refVolume);
+              InfKeyApp.of(context).rebuild();
             }
             Navigator.of(ctx).pop();
           },
@@ -620,8 +541,9 @@ class _TunerScreenState extends State<TunerScreen> {
             onPressed: () {
               final v = int.tryParse(ctrl.text);
               if (v != null) {
-                setState(() => _a4Ref = v.clamp(410, 480));
-                if (_isPlayingRef) AudioEngine().startReferenceTone(_a4Ref.toDouble());
+                setState(() => _settings.a4Ref = v.clamp(410, 480));
+                if (_isPlayingRef) AudioEngine().startReferenceTone(_settings.a4Ref.toDouble(), volume: _settings.refVolume);
+                InfKeyApp.of(context).rebuild();
               }
               Navigator.of(ctx).pop();
             },
@@ -633,9 +555,10 @@ class _TunerScreenState extends State<TunerScreen> {
   }
 
   Widget _buildNoteCircle(double size) {
+    final colorScheme = Theme.of(context).colorScheme;
     final inTune = _noteName != '--' && _cents.abs() <= 5;
-    final color = inTune ? Colors.greenAccent : const Color(0xFFd0e4ff);
-    final borderColor = inTune ? Colors.greenAccent : const Color(0xFF43474e);
+    final color = inTune ? Colors.green : colorScheme.primary;
+    final borderColor = inTune ? Colors.green : colorScheme.outline;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 180),
       width: size,
@@ -643,13 +566,13 @@ class _TunerScreenState extends State<TunerScreen> {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         border: Border.all(color: borderColor, width: 3),
-        color: inTune ? Colors.greenAccent.withAlpha(20) : Colors.transparent,
+        color: inTune ? Colors.green.withValues(alpha: 0.1) : Colors.transparent,
       ),
       child: _noteName == '--'
           ? Icon(
               _isRunning ? Icons.mic : Icons.mic_none,
               size: size * 0.3,
-              color: const Color(0xFF43474e),
+              color: colorScheme.onSurfaceVariant.withValues(alpha: 0.3),
             )
           : Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -668,7 +591,7 @@ class _TunerScreenState extends State<TunerScreen> {
                   '$_octave',
                   style: TextStyle(
                     fontSize: size * 0.12,
-                    color: color.withAlpha(180),
+                    color: color.withValues(alpha: 0.7),
                     fontWeight: FontWeight.w500,
                   ),
                 ),
@@ -678,6 +601,7 @@ class _TunerScreenState extends State<TunerScreen> {
   }
 
   Widget _buildCentsMeter(double width) {
+    final colorScheme = Theme.of(context).colorScheme;
     final normalized = _noteName == '--'
         ? 0.5
         : (_cents.clamp(-50, 50) + 50) / 100.0;
@@ -688,16 +612,16 @@ class _TunerScreenState extends State<TunerScreen> {
           width: width,
           height: 48,
           child: CustomPaint(
-            painter: _CentsMeterPainter(normalized, inTune),
+            painter: _CentsMeterPainter(normalized, inTune, colorScheme),
           ),
         ),
         const SizedBox(height: 6),
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('♭', style: TextStyle(color: Colors.white38, fontSize: 18)),
+            Text('♭', style: TextStyle(color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4), fontSize: 18)),
             SizedBox(width: width * 0.4),
-            const Text('♯', style: TextStyle(color: Colors.white38, fontSize: 18)),
+            Text('♯', style: TextStyle(color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4), fontSize: 18)),
           ],
         ),
         const SizedBox(height: 4),
@@ -705,7 +629,7 @@ class _TunerScreenState extends State<TunerScreen> {
           _noteName == '--'
               ? ''
               : '${_cents >= 0 ? '+' : ''}$_cents cent',
-          style: const TextStyle(fontSize: 12, color: Colors.white38),
+          style: TextStyle(fontSize: 12, color: colorScheme.onSurfaceVariant.withValues(alpha: 0.5)),
         ),
       ],
     );
@@ -715,7 +639,8 @@ class _TunerScreenState extends State<TunerScreen> {
 class _CentsMeterPainter extends CustomPainter {
   final double normalized;
   final bool inTune;
-  const _CentsMeterPainter(this.normalized, this.inTune);
+  final ColorScheme colorScheme;
+  const _CentsMeterPainter(this.normalized, this.inTune, this.colorScheme);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -728,7 +653,7 @@ class _CentsMeterPainter extends CustomPainter {
       Offset(pad, midY),
       Offset(w - pad, midY),
       Paint()
-        ..color = const Color(0xFF43474e)
+        ..color = colorScheme.outlineVariant
         ..strokeWidth = 4
         ..strokeCap = StrokeCap.round
         ..style = PaintingStyle.stroke,
@@ -736,7 +661,7 @@ class _CentsMeterPainter extends CustomPainter {
 
     // Ticks at 0%, 25%, 50%, 75%, 100%
     final tickPaint = Paint()
-      ..color = Colors.white24
+      ..color = colorScheme.onSurfaceVariant.withValues(alpha: 0.2)
       ..strokeWidth = 1.5;
     for (final frac in [0.0, 0.25, 0.5, 0.75, 1.0]) {
       final x = pad + (w - pad * 2) * frac;
@@ -750,13 +675,13 @@ class _CentsMeterPainter extends CustomPainter {
 
     // Needle
     final nx = pad + (w - pad * 2) * normalized;
-    final needleColor = inTune ? Colors.greenAccent : const Color(0xFFd0e4ff);
+    final needleColor = inTune ? Colors.green : colorScheme.primary;
     canvas.drawCircle(Offset(nx, midY), 10, Paint()..color = needleColor);
     canvas.drawCircle(
       Offset(nx, midY),
       10,
       Paint()
-        ..color = Colors.black26
+        ..color = colorScheme.onPrimary.withValues(alpha: 0.5)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.5,
     );
@@ -764,5 +689,5 @@ class _CentsMeterPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_CentsMeterPainter old) =>
-      old.normalized != normalized || old.inTune != inTune;
+      old.normalized != normalized || old.inTune != inTune || old.colorScheme != colorScheme;
 }

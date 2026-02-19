@@ -1,6 +1,7 @@
 import 'dart:math';
 import 'package:flutter_soloud/flutter_soloud.dart';
 import 'package:logging/logging.dart';
+import 'settings_manager.dart';
 
 final _log = Logger('AudioEngine');
 
@@ -40,9 +41,13 @@ class AudioEngine {
   }
 
   Future<void> _doInit() async {
-    await _soloud.init(bufferSize: 2048);
+    await _soloud.init(bufferSize: 512);
     _soloud.setMaxActiveVoiceCount(32);
-    _soloud.setGlobalVolume(8.0);
+    
+    final settings = SettingsManager();
+    await settings.init();
+    // SoLoudのデフォルトのボリュームをそのまま使用（* 8.0 は大きすぎて音割れの原因）
+    _soloud.setGlobalVolume(settings.globalVolume);
 
     _clickAHi = await _soloud.loadAsset('assets/audio/click_a_hi.wav');
     _clickALo = await _soloud.loadAsset('assets/audio/click_a_lo.wav');
@@ -55,6 +60,27 @@ class AudioEngine {
   }
 
   bool get isInitialized => _isInitialized;
+
+  void setGlobalVolume(double volume) {
+    if (_isInitialized) {
+      _soloud.setGlobalVolume(volume);
+    }
+  }
+
+  // iOS Webなどのための再開処理
+  Future<void> resume() async {
+    if (!_isInitialized) await init();
+    // Web Audio contextを再開させるためにサイン波を瞬時にならす
+    try {
+      final source = await _soloud.loadWaveform(WaveForm.sin, false, 0.001, 0);
+      _soloud.setWaveformFreq(source, 100);
+      final handle = await _soloud.play(source, volume: 0.001);
+      Future.delayed(const Duration(milliseconds: 50), () {
+        _soloud.stop(handle);
+        _soloud.disposeSource(source);
+      });
+    } catch (_) {}
+  }
 
   void dispose() {
     if (_isInitialized) {
@@ -86,14 +112,14 @@ class AudioEngine {
   }
 
   // お手本の音を鳴らす
-  Future<void> startReferenceTone(double frequency) async {
+  Future<void> startReferenceTone(double frequency, {double volume = 0.3}) async {
     await init();
     if (_refToneHandle != null) await stopReferenceTone();
 
     _refToneSource = await _soloud.loadWaveform(WaveForm.sin, false, 0.25, 0);
     if (_refToneSource != null) {
       _soloud.setWaveformFreq(_refToneSource!, frequency);
-      _refToneHandle = await _soloud.play(_refToneSource!, volume: 0.3);
+      _refToneHandle = await _soloud.play(_refToneSource!, volume: volume);
     }
   }
 
@@ -135,20 +161,28 @@ class AudioEngine {
   }) async {
     await init();
 
-    final sources = <int, AudioSource>{};
-    final handles = <int, SoundHandle>{};
     final totalSemitones = noteIndex + transpose + (tuning / 100);
+    final pow2Semitones = pow(2.0, totalSemitones / 12.0).toDouble();
+
+    // 全オクターブの音源生成と再生を並列実行
+    final futures = <Future<(AudioSource, SoundHandle)>>[];
 
     for (int octave = 0; octave < numOctaves; octave++) {
-      final freq = baseC0 * pow(2, octave) * pow(2, totalSemitones / 12);
-      final weight = _shepardWeight(freq.toDouble());
-      final vol = (weight * gain / 6.0).toDouble();
+      final freq = baseC0 * pow(2.0, octave.toDouble()) * pow2Semitones;
+      final weight = _shepardWeight(freq);
+      final vol = (weight * gain / 3.5).clamp(0.0, 0.6).toDouble();
 
-      final source = await _soloud.loadWaveform(WaveForm.triangle, false, 1.0, 0);
-      _soloud.setWaveformFreq(source, freq.toDouble());
-      final handle =
-          await _soloud.play(source, volume: vol, looping: true);
+      futures.add(
+        _createVoiceOctave(freq, vol)
+      );
+    }
 
+    final results = await Future.wait(futures);
+    final sources = <int, AudioSource>{};
+    final handles = <int, SoundHandle>{};
+
+    for (int octave = 0; octave < results.length; octave++) {
+      final (source, handle) = results[octave];
       sources[octave] = source;
       handles[octave] = handle;
     }
@@ -163,11 +197,19 @@ class AudioEngine {
     );
   }
 
+  Future<(AudioSource, SoundHandle)> _createVoiceOctave(double freq, double vol) async {
+    final source = await _soloud.loadWaveform(WaveForm.triangle, false, 1.0, 0);
+    _soloud.setWaveformFreq(source, freq);
+    final handle = await _soloud.play(source, volume: vol, looping: true);
+    return (source, handle);
+  }
+
   static double _shepardWeight(double freq) {
     const center = 400.0;
     const spread = 4.2;
+    const ln2Val = 0.693147180559945; // log(2)
     if (freq <= 0) return 0;
-    final x = log(freq / center) / ln2;
+    final x = log(freq / center) / ln2Val;
     return exp(-pow(x / spread, 4).toDouble());
   }
 }
@@ -203,18 +245,18 @@ class ShepardVoice {
 
   void _applyAll() {
     final totalSemitones = noteIndex + transpose + (tuning / 100);
+    final pow2Semitones = pow(2.0, totalSemitones / 12.0).toDouble();
     for (int octave = 0; octave < AudioEngine.numOctaves; octave++) {
       final source = sources[octave];
       final handle = handles[octave];
       if (source == null || handle == null) continue;
 
-      final freq =
-          AudioEngine.baseC0 * pow(2, octave) * pow(2, totalSemitones / 12);
-      final weight = AudioEngine._shepardWeight(freq.toDouble());
-      final vol = (weight * gain / 6.0).toDouble();
+      final freq = AudioEngine.baseC0 * pow(2.0, octave.toDouble()) * pow2Semitones;
+      final weight = AudioEngine._shepardWeight(freq);
+      final vol = (weight * gain / 6.0).clamp(0.0, 0.6).toDouble();
 
       try {
-        _soloud.setWaveformFreq(source, freq.toDouble());
+        _soloud.setWaveformFreq(source, freq);
         _soloud.setVolume(handle, vol);
       } catch (_) {}
     }

@@ -1,12 +1,13 @@
 import 'dart:async';
 import 'dart:math';
-import 'package:flutter/foundation.dart'; // Add this
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:torch_light/torch_light.dart';
-import 'package:vibration/vibration.dart';
 import 'audio_engine.dart';
 import 'metronome_engine.dart';
+import 'settings_manager.dart';
+import 'l10n.dart';
 
 // ─── トラック状態 ────────────────────────────────────────────
 class _TrackState {
@@ -19,7 +20,6 @@ class _TrackState {
   // フィードバック設定（トラック個別）
   bool soundEnabled     = true;
   bool hapticEnabled    = true;
-  bool vibrationEnabled = false;
   bool flashEnabled     = false;
   bool muted            = false; // 全フィードバック一時ミュート
 
@@ -42,9 +42,9 @@ class MetronomeScreen extends StatefulWidget {
 class _MetronomeScreenState extends State<MetronomeScreen> {
   late final _TrackState _a;
   late final _TrackState _b;
+  final _l10n = L10n();
   bool _isPlaying = false;
   bool _hasTorch   = false;
-  bool _hasVibrator = false;
 
   static const _minBpm = 1;
   static const _maxBpm = 500;
@@ -52,12 +52,13 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
   @override
   void initState() {
     super.initState();
-    _a = _TrackState(engine: MetronomeTrack(bpm: 120, beatsPerMeasure: 4), bpm: 120, beatsPerMeasure: 4);
+    final settings = SettingsManager();
+    final bpm = settings.bpm;
+    final beats = settings.beatsPerMeasure;
+    _a = _TrackState(engine: MetronomeTrack(bpm: bpm, beatsPerMeasure: beats), bpm: bpm, beatsPerMeasure: beats);
     _b = _TrackState(engine: MetronomeTrack(bpm: 120, beatsPerMeasure: 3), bpm: 120, beatsPerMeasure: 3);
     _b.muted = true; // 初期状態では B をミュート
-    _a.engine.onPreTick = (beat) => _onPreTick(beat, _a);
     _a.engine.onTick    = (beat) => _onTick(beat, _a, 0);
-    _b.engine.onPreTick = (beat) => _onPreTick(beat, _b);
     _b.engine.onTick    = (beat) => _onTick(beat, _b, 1);
     AudioEngine().init();
     _checkCapabilities();
@@ -65,7 +66,6 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
 
   Future<void> _checkCapabilities() async {
     try {
-      final hasVib = await Vibration.hasVibrator();
       bool hasTorch = false;
       if (!kIsWeb) {
         hasTorch = await TorchLight.isTorchAvailable();
@@ -73,7 +73,6 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
       if (mounted) {
         setState(() {
           _hasTorch = hasTorch;
-          _hasVibrator = (hasVib == true);
         });
       }
     } catch (_) {}
@@ -87,23 +86,40 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
   }
 
   // ─── コールバック ─────────────────────────────────────────
-  void _onPreTick(int beat, _TrackState t) {
-    if (t.muted) return;
-    final isDown = beat == 1;
-    if (t.hapticEnabled) {
-      isDown ? HapticFeedback.heavyImpact() : HapticFeedback.lightImpact();
-    }
-    if (t.vibrationEnabled && _hasVibrator && !kIsWeb) {
-      Vibration.vibrate(duration: isDown ? 60 : 25, amplitude: isDown ? 200 : 80);
-    }
-  }
-
   void _onTick(int beat, _TrackState t, int trackIndex) {
     if (!mounted) return;
     final isDown = beat == 1;
+    final settings = SettingsManager();
     if (!t.muted) {
-      if (t.soundEnabled)  AudioEngine().playClick(isDown, trackIndex: trackIndex);
-      if (t.flashEnabled && _hasTorch && !kIsWeb) _torchFlash(isDown);
+      // サウンド（オフセット適用）
+      if (t.soundEnabled) {
+        final delay = settings.soundOffsetMs;
+        void doSound() => AudioEngine().playClick(isDown, trackIndex: trackIndex);
+        if (delay <= 0) {
+          doSound();
+        } else {
+          Future.delayed(Duration(milliseconds: delay), doSound);
+        }
+      }
+      // ハプティクス（独立した設定）
+      if (t.hapticEnabled && !kIsWeb) {
+        final delay = settings.hapticOffsetMs;
+        void doHaptic() => isDown ? HapticFeedback.heavyImpact() : HapticFeedback.lightImpact();
+        if (delay <= 0) {
+          doHaptic();
+        } else {
+          Future.delayed(Duration(milliseconds: delay), doHaptic);
+        }
+      }
+      // フラッシュ（オフセット適用）
+      if (t.flashEnabled && _hasTorch && !kIsWeb) {
+        final delay = settings.flashOffsetMs;
+        if (delay <= 0) {
+          _torchFlash(isDown);
+        } else {
+          Future.delayed(Duration(milliseconds: delay), () => _torchFlash(isDown));
+        }
+      }
       setState(() => t.currentBeat = beat);
     }
   }
@@ -148,18 +164,21 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
       final v = (60000 / avg).round().clamp(_minBpm, _maxBpm);
       setState(() => t.bpm = v);
       t.engine.updateBpm(v);
+      if (t == _a) SettingsManager().bpm = v;
     }
   }
 
   void _setBpm(_TrackState t, int v) {
     setState(() => t.bpm = v.clamp(_minBpm, _maxBpm));
     t.engine.updateBpm(t.bpm);
+    if (t == _a) SettingsManager().bpm = t.bpm;
   }
 
   void _setBeats(_TrackState t, int v) {
     final n = v.clamp(1, 32);
     setState(() { t.beatsPerMeasure = n; t.currentBeat = 0; });
     t.engine.updateBeatsPerMeasure(n);
+    if (t == _a) SettingsManager().beatsPerMeasure = n;
   }
 
   Future<void> _showDialog(String label, int current, int min, int max, void Function(int) onChanged) async {
@@ -172,7 +191,10 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
           controller: ctrl,
           keyboardType: const TextInputType.numberWithOptions(signed: false),
           autofocus: true,
-          decoration: InputDecoration(hintText: '$min ~ $max'),
+          decoration: InputDecoration(
+            hintText: '$min ~ $max',
+            suffixText: label == 'BPM' ? 'BPM' : '',
+          ),
           onSubmitted: (s) {
             final v = int.tryParse(s);
             if (v != null) onChanged(v.clamp(min, max));
@@ -180,7 +202,10 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
           },
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(_l10n.tr('cancel')),
+          ),
           TextButton(
             onPressed: () {
               final v = int.tryParse(ctrl.text);
@@ -253,24 +278,25 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
   }
 
   Widget _buildDivider({required bool horizontal, double length = 180}) {
-    const color = Color(0xFF43474e);
+    final colorScheme = Theme.of(context).colorScheme;
     return horizontal
-        ? Container(height: 1, width: length * 1.5, color: color)
-        : Container(width: 1, height: length, color: color);
+        ? Container(height: 1, width: length * 1.5, color: colorScheme.outlineVariant)
+        : Container(width: 1, height: length, color: colorScheme.outlineVariant);
   }
 
   // ─── スタート/ストップ ────────────────────────────────────
   Widget _buildStartStop() {
+    final colorScheme = Theme.of(context).colorScheme;
     return SizedBox(
       width: 140,
-      height: 44,
+      height: 48,
       child: FilledButton.icon(
         onPressed: _startStop,
-        icon: Icon(_isPlaying ? Icons.stop : Icons.play_arrow, size: 22),
-        label: Text(_isPlaying ? 'Stop' : 'Start'),
+        icon: Icon(_isPlaying ? Icons.stop : Icons.play_arrow, size: 24),
+        label: Text(_isPlaying ? _l10n.tr('stop') : _l10n.tr('start')),
         style: FilledButton.styleFrom(
-          backgroundColor: _isPlaying ? const Color(0xFF5a3f47) : const Color(0xFF3a4e6e),
-          foregroundColor: Colors.white,
+          backgroundColor: _isPlaying ? colorScheme.errorContainer : colorScheme.primary,
+          foregroundColor: _isPlaying ? colorScheme.onErrorContainer : colorScheme.onPrimary,
         ),
       ),
     );
@@ -283,7 +309,7 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
       children: [
         // ビートインジケーター
         _buildBeatIndicator(t, trackIndex: trackIndex, size: indicatorSize),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         // BPM + BEAT ピル
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -306,90 +332,94 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
             ),
           ],
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         // フィードバックトグル + Tap + Mute を横一列
         _buildControlRow(t),
       ],
     );
   }
 
-  // ─── フィードバック + Tap + Mute 横一列 ──────────────────
+// ─── フィードバック + Tap + Mute ─────────────────────────
   Widget _buildControlRow(_TrackState t) {
-    return Wrap(
-      spacing: 6,
-      runSpacing: 6,
-      alignment: WrapAlignment.center,
-      children: [
-        _toggle(Icons.volume_up,  'Sound',  t.soundEnabled,
-            (v) => setState(() => t.soundEnabled = v)),
-        // Web ではハプティック、バイブレーション、フラッシュを表示しない
-        if (!kIsWeb) ...[
-          _toggle(Icons.vibration,  'Haptic', t.hapticEnabled,
-              (v) => setState(() => t.hapticEnabled = v)),
-          if (_hasVibrator)
-            _toggle(Icons.sensors, 'Vibrate', t.vibrationEnabled,
-                (v) => setState(() => t.vibrationEnabled = v)),
-          if (_hasTorch)
-            _toggle(Icons.flash_on,  'Flash',  t.flashEnabled,
-                (v) => setState(() => t.flashEnabled = v)),
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _toggle(Icons.volume_up, _l10n.tr('metro_sound'), t.soundEnabled,
+              (v) => setState(() => t.soundEnabled = v)),
+          const SizedBox(width: 4),
+          if (!kIsWeb) ...[    
+            _toggle(Icons.vibration, _l10n.tr('metro_haptic'), t.hapticEnabled,
+                (v) => setState(() => t.hapticEnabled = v)),
+            const SizedBox(width: 4),
+            if (_hasTorch) ...[  
+              _toggle(Icons.flash_on, _l10n.tr('metro_flash'), t.flashEnabled,
+                  (v) => setState(() => t.flashEnabled = v)),
+              const SizedBox(width: 4),
+            ],
+          ],
+          _buildVerticalDivider(),
+          const SizedBox(width: 4),
+          _buildTapBtn(t),
+          const SizedBox(width: 4),
+          _buildMuteBtn(t),
         ],
-        // 仕切り代わりの細い線
-        Container(width: 1, height: 36, color: const Color(0xFF43474e),
-            margin: const EdgeInsets.symmetric(horizontal: 2)),
-        // Tap ボタン
-        _buildTapBtn(t),
-        // Mute ボタン
-        _buildMuteBtn(t),
-      ],
+      ),
+    );
+  }
+
+  Widget _buildVerticalDivider() {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      width: 1, height: 36,
+      color: colorScheme.outlineVariant,
+      margin: const EdgeInsets.symmetric(horizontal: 2),
     );
   }
 
   // ─── タップボタン（アイコンのみ） ────────────────────────
   Widget _buildTapBtn(_TrackState t) {
-    return GestureDetector(
-      onTap: () => _tapTempo(t),
-      child: Container(
-        width: 44,
-        height: 44,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: const Color(0xFF43474e),
-          border: Border.all(color: const Color(0xFF5a5e66)),
-        ),
-        child: const Icon(Icons.touch_app, size: 22, color: Color(0xFFd0e4ff)),
+    final colorScheme = Theme.of(context).colorScheme;
+    return IconButton(
+      onPressed: () => _tapTempo(t),
+      iconSize: 22,
+      icon: Icon(Icons.touch_app, color: colorScheme.primary),
+      style: IconButton.styleFrom(
+        side: BorderSide(color: colorScheme.outlineVariant),
+        backgroundColor: colorScheme.surfaceContainerHighest,
       ),
     );
   }
 
   // ─── ミュートボタン ──────────────────────────────────────
   Widget _buildMuteBtn(_TrackState t) {
-    return GestureDetector(
-      onTap: () => setState(() {
-          t.muted = !t.muted;
-          if (t.muted) t.currentBeat = 0;
-        }),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        width: 44,
-        height: 44,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: t.muted ? const Color(0xFF5a3f47) : const Color(0xFF43474e),
-          border: Border.all(
-            color: t.muted ? const Color(0xFFffb2be) : const Color(0xFF5a5e66),
-          ),
-        ),
-        child: Icon(
-          t.muted ? Icons.volume_off : Icons.volume_mute,
-          size: 22,
-          color: t.muted ? const Color(0xFFffb2be) : Colors.white54,
-        ),
-      ),
+    final colorScheme = Theme.of(context).colorScheme;
+    return IconButton(
+      onPressed: () => setState(() {
+        t.muted = !t.muted;
+        if (t.muted) t.currentBeat = 0;
+      }),
+      iconSize: 22,
+      icon: Icon(t.muted ? Icons.volume_off : Icons.volume_mute),
+      style: t.muted
+          ? IconButton.styleFrom(
+              backgroundColor: colorScheme.errorContainer,
+              foregroundColor: colorScheme.onErrorContainer,
+              side: BorderSide(color: colorScheme.error),
+            )
+          : IconButton.styleFrom(
+              side: BorderSide(color: colorScheme.outlineVariant),
+              backgroundColor: colorScheme.surfaceContainerHighest,
+              foregroundColor: colorScheme.onSurfaceVariant,
+            ),
     );
   }
 
   // ─── ビートインジケーター ────────────────────────────────
   Widget _buildBeatIndicator(_TrackState t, {required int trackIndex, required double size}) {
+    final colorScheme = Theme.of(context).colorScheme;
     return SizedBox(
       width: size,
       height: size,
@@ -398,6 +428,7 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
           total: t.beatsPerMeasure,
           current: _isPlaying ? t.currentBeat : 0,
           trackIndex: trackIndex,
+          colorScheme: colorScheme,
         ),
         child: Center(
           child: _BeatText(
@@ -420,17 +451,19 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
     required VoidCallback onTapValue,
     required double valueWidth,
   }) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: const Color(0xFF43474e),
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: colorScheme.outlineVariant),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(label, style: const TextStyle(
-            color: Colors.white70, fontSize: 9, fontWeight: FontWeight.bold,
+          Text(label, style: TextStyle(
+            color: colorScheme.onSurfaceVariant, fontSize: 9, fontWeight: FontWeight.bold,
           )),
           const SizedBox(width: 6),
           _buildIconBtn(Icons.remove, onDecrement),
@@ -441,9 +474,9 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
               child: Text(
                 '$value',
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12,
-                  decoration: TextDecoration.underline, decorationColor: Colors.white38,
+                style: TextStyle(
+                  color: colorScheme.primary, fontWeight: FontWeight.bold, fontSize: 12,
+                  decoration: TextDecoration.underline, decorationColor: colorScheme.primary.withValues(alpha: 0.3),
                 ),
               ),
             ),
@@ -461,24 +494,28 @@ class _MetronomeScreenState extends State<MetronomeScreen> {
 
   // ─── フィードバックトグル
   Widget _toggle(IconData icon, String label, bool value, ValueChanged<bool> onChanged) {
+    final colorScheme = Theme.of(context).colorScheme;
     return GestureDetector(
       onTap: () => onChanged(!value),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 120),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        width: 58,
         decoration: BoxDecoration(
-          color: value ? const Color(0xFF3a4e6e) : const Color(0xFF252830),
+          color: value ? colorScheme.primaryContainer.withValues(alpha: 0.7) : colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: value ? const Color(0xFFd0e4ff) : const Color(0xFF43474e)),
+          border: Border.all(color: value ? colorScheme.primary : colorScheme.outlineVariant),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 16, color: value ? const Color(0xFFd0e4ff) : Colors.white30),
+            Icon(icon, size: 16, color: value ? colorScheme.primary : colorScheme.onSurfaceVariant.withValues(alpha: 0.4)),
             const SizedBox(height: 2),
-            Text(label, style: TextStyle(
-              fontSize: 8, color: value ? const Color(0xFFd0e4ff) : Colors.white30,
-            )),
+            FittedBox(
+              child: Text(label, style: TextStyle(
+                fontSize: 8, color: value ? colorScheme.primary : colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
+              )),
+            ),
           ],
         ),
       ),
@@ -519,6 +556,7 @@ class _LongPressIconBtnState extends State<_LongPressIconBtn> {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     return GestureDetector(
       onTap: widget.onTap,
       onLongPressStart: (_) => _startLongPress(),
@@ -527,11 +565,11 @@ class _LongPressIconBtnState extends State<_LongPressIconBtn> {
       child: Container(
         width: 32,
         height: 32,
-        decoration: const BoxDecoration(
-          color: Color(0xFFd0e4ff),
+        decoration: BoxDecoration(
+          color: colorScheme.secondaryContainer,
           shape: BoxShape.circle,
         ),
-        child: Icon(widget.icon, size: 16, color: const Color(0xFF003258)),
+        child: Icon(widget.icon, size: 16, color: colorScheme.onSecondaryContainer),
       ),
     );
   }
@@ -542,11 +580,13 @@ class _BeatIndicatorPainter extends CustomPainter {
   final int total;
   final int current;
   final int trackIndex;
+  final ColorScheme colorScheme;
 
   const _BeatIndicatorPainter({
     required this.total,
     required this.current,
     required this.trackIndex,
+    required this.colorScheme,
   });
 
   @override
@@ -557,12 +597,9 @@ class _BeatIndicatorPainter extends CustomPainter {
     final dotR = total > 20 ? 3.5 : (total > 12 ? 4.5 : 6.0);
 
     // 中心円の枠
-    final bool isDown = current == 1;
-    final downbeatColor =
-        trackIndex == 0 ? const Color(0xFFffb2be) : const Color(0xFFb2ffcc);
-    final borderColor = (current > 0 && isDown)
-        ? downbeatColor
-        : const Color(0xFF43474e);
+    final borderColor = current > 0
+        ? (trackIndex == 0 ? colorScheme.primary : colorScheme.tertiary)
+        : colorScheme.outlineVariant;
     canvas.drawCircle(
       center,
       radius * 0.72,
@@ -574,12 +611,9 @@ class _BeatIndicatorPainter extends CustomPainter {
 
     // 外周ドット
     final Color activeColor = trackIndex == 0
-        ? const Color(0xFFd0e4ff)
-        : const Color(0xFFc8f2d0);
-    final downColor = trackIndex == 0
-        ? const Color(0xFFffb2be)
-        : const Color(0xFFb2ffcc);
-    const inactiveColor = Color(0xFF3a3e44);
+        ? colorScheme.primary
+        : colorScheme.tertiary;
+    final Color inactiveColor = colorScheme.onSurfaceVariant.withValues(alpha: 0.15);
 
     for (int i = 0; i < total; i++) {
       final angle = -pi / 2 + (2 * pi / total) * i;
@@ -589,7 +623,7 @@ class _BeatIndicatorPainter extends CustomPainter {
       );
       final isActive = current == i + 1;
       final color = isActive
-          ? (i == 0 ? downColor : activeColor)
+          ? activeColor
           : inactiveColor;
       canvas.drawCircle(pos, isActive ? dotR * 1.25 : dotR,
           Paint()..color = color);
@@ -598,7 +632,7 @@ class _BeatIndicatorPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_BeatIndicatorPainter old) =>
-      old.current != current || old.total != total || old.trackIndex != trackIndex;
+      old.current != current || old.total != total || old.trackIndex != trackIndex || old.colorScheme != colorScheme;
 }
 
 // ─── ビート数テキスト（StatelessWidget で setState 分離） ────
@@ -615,16 +649,17 @@ class _BeatText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bool isDown = beat == 1;
-    final accentColor = trackIndex == 0
-        ? (isDown ? const Color(0xFFffb2be) : const Color(0xFFd0e4ff))
-        : (isDown ? const Color(0xFFb2ffcc) : const Color(0xFFc8f2d0));
+    final colorScheme = Theme.of(context).colorScheme;
+    final Color activeColor = trackIndex == 0
+        ? colorScheme.primary
+        : colorScheme.tertiary;
+
     if (beat == 0) {
       return Text(
         '$total',
         style: TextStyle(
           fontSize: size * 0.28,
-          color: Colors.white30,
+          color: colorScheme.onSurfaceVariant.withValues(alpha: 0.2),
           fontWeight: FontWeight.bold,
         ),
       );
@@ -637,7 +672,7 @@ class _BeatText extends StatelessWidget {
           style: TextStyle(
             fontSize: size * 0.34,
             fontWeight: FontWeight.bold,
-            color: accentColor,
+            color: activeColor,
             height: 1.0,
             letterSpacing: -1,
           ),
@@ -646,7 +681,7 @@ class _BeatText extends StatelessWidget {
           '/ $total',
           style: TextStyle(
             fontSize: size * 0.13,
-            color: accentColor.withAlpha(140),
+            color: activeColor.withValues(alpha: 0.5),
             fontWeight: FontWeight.w500,
           ),
         ),

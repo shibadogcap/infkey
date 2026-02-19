@@ -4,6 +4,10 @@ import 'audio_engine.dart';
 import 'keyboard_layout.dart';
 import 'metronome_screen.dart';
 import 'tuner_screen.dart';
+import 'settings_screen.dart';
+import 'settings_manager.dart';
+import 'l10n.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -24,6 +28,8 @@ class VoiceGroup {
 class _MainScreenState extends State<MainScreen> {
   final AudioEngine _audioEngine = AudioEngine();
   final Map<int, VoiceGroup> _activeGroups = {};
+  final _settings = SettingsManager();
+  final _l10n = L10n();
   
   // State for UI updates
   // We need to know which keys are active for each row type to highlight them.
@@ -38,15 +44,14 @@ class _MainScreenState extends State<MainScreen> {
     'melody': {},
   };
 
-  // Settings
-  int _transpose = 0;
-  int _tuning = 0;
-
   // Navigation
   int _selectedIndex = 0;
+  bool _audioNeedsResume = kIsWeb;
+  final ValueNotifier<bool> _tunerActive = ValueNotifier(false);
 
-  // MetronomeScreen を一度だけ生成して縦横で使い回す（State 保持のため）
+  // 各画面を一度だけ生成して縦横で使い回す（State 保持のため）
   late final Widget _metronomeScreen;
+  late final Widget _tunerScreen;
 
   // Chord Map
   static const Map<String, List<int>> _chordMap = {
@@ -60,12 +65,29 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    _audioEngine.init();
+    _initAsync();
     _metronomeScreen = const MetronomeScreen();
+    _tunerScreen = TunerScreen(isActive: _tunerActive);
+  }
+
+  Future<void> _initAsync() async {
+    await _settings.init();
+    await _audioEngine.init();
+    if (mounted) setState(() {});
+  }
+
+  void _onDestinationSelected(int idx) {
+    if (_selectedIndex == idx) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _selectedIndex = idx;
+      _tunerActive.value = (idx == 2);
+    });
   }
 
   @override
   void dispose() {
+    _tunerActive.dispose();
     _audioEngine.dispose();
     super.dispose();
   }
@@ -89,15 +111,15 @@ class _MainScreenState extends State<MainScreen> {
 
     // Start voices
     final intervals = _chordMap[type] ?? [0];
-    final double gain = type == 'melody' ? 0.48 : 0.28;
+    final double gain = type == 'melody' ? 0.65 : 0.45;
 
     List<ShepardVoice> voices = [];
     for (final interval in intervals) {
       final voice = await _audioEngine.startVoice(
         note + interval,
         gain,
-        transpose: _transpose.toDouble(),
-        tuning: _tuning.toDouble(),
+        transpose: _settings.transpose.toDouble(),
+        tuning: _settings.tuning.toDouble(),
       );
       voices.add(voice);
     }
@@ -118,8 +140,8 @@ class _MainScreenState extends State<MainScreen> {
         if (i < intervals.length) {
           group.voices[i].updateFrequencies(
             note + intervals[i],
-            transpose: _transpose.toDouble(),
-            tuning: _tuning.toDouble(),
+            transpose: _settings.transpose.toDouble(),
+            tuning: _settings.tuning.toDouble(),
           );
         }
       }
@@ -144,8 +166,8 @@ class _MainScreenState extends State<MainScreen> {
          if (i < intervals.length) {
            group.voices[i].updateFrequencies(
              group.rootNote + intervals[i],
-             transpose: _transpose.toDouble(),
-             tuning: _tuning.toDouble(),
+             transpose: _settings.transpose.toDouble(),
+             tuning: _settings.tuning.toDouble(),
            );
          }
        }
@@ -154,20 +176,53 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return OrientationBuilder(
-      builder: (context, orientation) {
-        if (orientation == Orientation.landscape) {
-          return _buildLandscape();
-        } else {
-          return _buildPortrait();
-        }
-      },
+    return Stack(
+      children: [
+        OrientationBuilder(
+          builder: (context, orientation) {
+            if (orientation == Orientation.landscape) {
+              return _buildLandscape();
+            } else {
+              return _buildPortrait();
+            }
+          },
+        ),
+        if (_audioNeedsResume)
+          _buildWebAudioOverlay(),
+      ],
+    );
+  }
+
+  Widget _buildWebAudioOverlay() {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: Colors.black.withValues(alpha: 0.8),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.volume_up, size: 80, color: colorScheme.onSurface),
+            const SizedBox(height: 24),
+            Text(
+              _l10n.tr('web_audio_resume'),
+              style: TextStyle(color: colorScheme.onSurface, fontSize: 18),
+            ),
+            const SizedBox(height: 32),
+            ElevatedButton(
+              onPressed: () {
+                _audioEngine.resume();
+                setState(() => _audioNeedsResume = false);
+              },
+              child: Text(_l10n.tr('start_audio')),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
   Widget _buildPortrait() {
     return Scaffold(
-      backgroundColor: const Color(0xFF1a1c1e),
       body: SafeArea(
         child: Column(
           children: [
@@ -188,31 +243,59 @@ class _MainScreenState extends State<MainScreen> {
       children: [
         _buildKeyboardStack(),
         _metronomeScreen,
-        TunerScreen(isActive: _selectedIndex == 2),
+        _tunerScreen,
+        const SettingsScreen(),
+      ],
+    );
+  }
+
+  Widget _buildBottomNav() {
+    final colorScheme = Theme.of(context).colorScheme;
+    return NavigationBar(
+      selectedIndex: _selectedIndex,
+      onDestinationSelected: _onDestinationSelected,
+      backgroundColor: colorScheme.surface,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      destinations: [
+        NavigationDestination(icon: const Icon(Icons.piano), label: _l10n.tr('play')),
+        NavigationDestination(icon: const Icon(Icons.av_timer), label: _l10n.tr('click')),
+        NavigationDestination(icon: const Icon(Icons.graphic_eq), label: _l10n.tr('tune')),
+        NavigationDestination(icon: const Icon(Icons.settings), label: _l10n.tr('settings')),
       ],
     );
   }
 
   Widget _buildLandscape() {
     return Scaffold(
-      backgroundColor: const Color(0xFF1a1c1e),
       body: SafeArea(
         child: Row(
           children: [
             // Nav - fixed width
-            SizedBox(
-              width: 58,
-              child: _buildLandscapeNav(),
-            ),
+            _buildLandscapeNav(),
             // Page content
             Expanded(
               child: _selectedIndex == 0
                   ? _buildLandscapePlay()
-                  : _buildLandscapeSubPage(),
+                  : _buildPage(),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildLandscapeNav() {
+    return NavigationRail(
+      selectedIndex: _selectedIndex,
+      onDestinationSelected: _onDestinationSelected,
+      labelType: NavigationRailLabelType.all,
+      destinations: [
+        NavigationRailDestination(icon: const Icon(Icons.piano), label: Text(_l10n.tr('play'), style: const TextStyle(fontFamily: 'NotoSansJP'))),
+        NavigationRailDestination(icon: const Icon(Icons.av_timer), label: Text(_l10n.tr('click'), style: const TextStyle(fontFamily: 'NotoSansJP'))),
+        NavigationRailDestination(icon: const Icon(Icons.graphic_eq), label: Text(_l10n.tr('tune'), style: const TextStyle(fontFamily: 'NotoSansJP'))),
+        NavigationRailDestination(icon: const Icon(Icons.settings), label: Text(_l10n.tr('settings'), style: const TextStyle(fontFamily: 'NotoSansJP'))),
+      ],
     );
   }
 
@@ -255,30 +338,13 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Widget _buildLandscapeSubPage() {
-    return IndexedStack(
-      index: _selectedIndex,
-      children: <Widget>[
-        const SizedBox.shrink(),
-        _metronomeScreen,
-        TunerScreen(isActive: _selectedIndex == 2),
-      ],
-    );
-  }
-
   Widget _buildKeyboardStack() {
+    final colorScheme = Theme.of(context).colorScheme;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF43474e),
+        color: colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.2),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          )
-        ],
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(
@@ -294,95 +360,14 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Widget _buildKeyboardCard({required Widget child}) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF43474e),
+        color: colorScheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.2),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
       ),
       clipBehavior: Clip.antiAlias,
       child: child,
-    );
-  }
-
-  Widget _buildLandscapeNav() {
-    const items = [
-      (Icons.piano_outlined, Icons.piano, 'Play'),
-      (Icons.av_timer_outlined, Icons.av_timer, 'Metro'),
-      (Icons.graphic_eq_outlined, Icons.graphic_eq, 'Tuner'),
-    ];
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(items.length, (i) {
-        final selected = _selectedIndex == i;
-        return GestureDetector(
-          onTap: () {
-            if (_selectedIndex != i) HapticFeedback.selectionClick();
-            setState(() => _selectedIndex = i);
-          },
-          child: Container(
-            margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
-            padding: const EdgeInsets.symmetric(vertical: 5),
-            decoration: BoxDecoration(
-              color: selected ? const Color(0xFF3a4e6e) : Colors.transparent,
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  selected ? items[i].$2 : items[i].$1,
-                  color: selected ? const Color(0xFFd0e4ff) : Colors.white54,
-                  size: 22,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  items[i].$3,
-                  style: TextStyle(
-                    fontSize: 9,
-                    color: selected ? const Color(0xFFd0e4ff) : Colors.white38,
-                    fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      }),
-    );
-  }
-
-  NavigationBar _buildBottomNav() {
-    return NavigationBar(
-      backgroundColor: const Color(0xFF1a1c1e),
-      selectedIndex: _selectedIndex,
-      onDestinationSelected: (i) {
-        if (_selectedIndex != i) HapticFeedback.selectionClick();
-        setState(() => _selectedIndex = i);
-      },
-      destinations: const [
-        NavigationDestination(
-          icon: Icon(Icons.piano_outlined),
-          selectedIcon: Icon(Icons.piano),
-          label: 'Play',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.av_timer_outlined),
-          selectedIcon: Icon(Icons.av_timer),
-          label: 'Metronome',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.graphic_eq_outlined),
-          selectedIcon: Icon(Icons.graphic_eq),
-          label: 'Tuner',
-        ),
-      ],
     );
   }
 
@@ -392,13 +377,13 @@ class _MainScreenState extends State<MainScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          _buildControlPillVertical("KEY", _transpose, -12, 12, (v) {
-            setState(() => _transpose = v);
+          _buildControlPillVertical("KEY", _settings.transpose, -12, 12, (v) {
+            setState(() => _settings.transpose = v);
             _updateAllVoices();
           }),
           const SizedBox(height: 8),
-          _buildControlPillVertical("TUNE", _tuning, -100, 100, (v) {
-            setState(() => _tuning = v);
+          _buildControlPillVertical("TUNE", _settings.tuning, -100, 100, (v) {
+            setState(() => _settings.tuning = v);
             _updateAllVoices();
           }),
         ],
@@ -408,18 +393,20 @@ class _MainScreenState extends State<MainScreen> {
 
   Widget _buildControlPillVertical(
       String label, int value, int min, int max, Function(int) onChanged) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
       decoration: BoxDecoration(
-        color: const Color(0xFF43474e),
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: colorScheme.outlineVariant),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(label,
-              style: const TextStyle(
-                  color: Colors.white70,
+              style: TextStyle(
+                  color: colorScheme.onSurfaceVariant,
                   fontSize: 9,
                   fontWeight: FontWeight.bold)),
           const SizedBox(height: 4),
@@ -432,12 +419,12 @@ class _MainScreenState extends State<MainScreen> {
               child: Text(
                 value.toString(),
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white,
+                style: TextStyle(
+                  color: colorScheme.primary,
                   fontWeight: FontWeight.bold,
                   fontSize: 14,
                   decoration: TextDecoration.underline,
-                  decorationColor: Colors.white38,
+                  decorationColor: colorScheme.primary.withValues(alpha: 0.3),
                 ),
               ),
             ),
@@ -455,13 +442,13 @@ class _MainScreenState extends State<MainScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
-          _buildControlPill("KEY", _transpose, -12, 12, (v) {
-             setState(() => _transpose = v);
+          _buildControlPill("KEY", _settings.transpose, -12, 12, (v) {
+             setState(() => _settings.transpose = v);
              _updateAllVoices();
           }),
           const SizedBox(width: 12),
-          _buildControlPill("TUNE", _tuning, -100, 100, (v) {
-             setState(() => _tuning = v);
+          _buildControlPill("TUNE", _settings.tuning, -100, 100, (v) {
+             setState(() => _settings.tuning = v);
              _updateAllVoices();
           }),
         ],
@@ -490,7 +477,7 @@ class _MainScreenState extends State<MainScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
+            child: Text(_l10n.tr('cancel')),
           ),
           TextButton(
             onPressed: () {
@@ -506,17 +493,19 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Widget _buildControlPill(String label, int value, int min, int max, Function(int) onChanged) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       decoration: BoxDecoration(
-        color: const Color(0xFF43474e),
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: colorScheme.outlineVariant),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(label, style: const TextStyle(
-            color: Colors.white70, 
+          Text(label, style: TextStyle(
+            color: colorScheme.onSurfaceVariant, 
             fontSize: 9, 
             fontWeight: FontWeight.bold
           )),
@@ -529,12 +518,12 @@ class _MainScreenState extends State<MainScreen> {
               child: Text(
                 value.toString(),
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white,
+                style: TextStyle(
+                  color: colorScheme.primary,
                   fontWeight: FontWeight.bold,
                   fontSize: 12,
                   decoration: TextDecoration.underline,
-                  decorationColor: Colors.white38,
+                  decorationColor: colorScheme.primary.withValues(alpha: 0.3),
                 ),
               ),
             ),
@@ -546,33 +535,29 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Widget _buildIconBtn(IconData icon, VoidCallback onTap) {
+    final colorScheme = Theme.of(context).colorScheme;
     return GestureDetector(
       onTap: onTap,
       child: Container(
         width: 32,
         height: 32,
-        decoration: const BoxDecoration(
-          color: Color(0xFFd0e4ff),
+        decoration: BoxDecoration(
+          color: colorScheme.secondaryContainer,
           shape: BoxShape.circle,
         ),
-        child: Icon(icon, size: 16, color: const Color(0xFF003258)),
+        child: Icon(icon, size: 16, color: colorScheme.onSecondaryContainer),
       ),
     );
   }
 
   Widget _buildKeyWidget(String type, String label) {
-    return Container(
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Colors.black12)),
-      ),
-      child: KeyboardLayout(
-        label: label,
-        type: type,
-        activeNotes: _activeNotes[type]!,
-        onNoteStart: (ptr, note, t) => _onNoteStart(ptr, note, t),
-        onNoteMove: (ptr, note, t) => _onNoteMove(ptr, note, t),
-        onNoteEnd: (ptr, t) => _onNoteEnd(ptr),
-      ),
+    return KeyboardLayout(
+      label: label,
+      type: type,
+      activeNotes: _activeNotes[type]!,
+      onNoteStart: (ptr, note, t) => _onNoteStart(ptr, note, t),
+      onNoteMove: (ptr, note, t) => _onNoteMove(ptr, note, t),
+      onNoteEnd: (ptr, t) => _onNoteEnd(ptr),
     );
   }
 
