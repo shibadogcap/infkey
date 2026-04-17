@@ -56,6 +56,8 @@ class L10n {
       'timing_flash': 'フラッシュ遅延',
       'timing_note': '正の値 = 拍より遅らせる / 負の値 = 早める (ms)',
       'direct_input': '数値を直接入力',
+      'privacy_policy': 'プライバシーポリシー',
+      'terms_of_service': '利用規約',
     },
     'en': {
       'play': 'Play',
@@ -105,6 +107,8 @@ class L10n {
       'timing_flash': 'Flash Delay',
       'timing_note': 'Positive = delay after beat / Negative = advance (ms)',
       'direct_input': 'Enter value',
+      'privacy_policy': 'Privacy Policy',
+      'terms_of_service': 'Terms of Service',
     },
   };
 

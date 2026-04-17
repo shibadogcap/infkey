@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'settings_manager.dart';
 import 'audio_engine.dart';
 import 'l10n.dart';
@@ -16,6 +17,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _settings = SettingsManager();
   final _audio = AudioEngine();
   final _l10n = L10n();
+
+  Future<void> _launchURL(String urlPath) async {
+    final uri = Uri.parse('https://infkey.shibadogcap.com/$urlPath');
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      debugPrint('Could not launch $uri');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -220,12 +228,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _sectionTitle('info'),
           const ListTile(
             title: Text('Version'),
-            trailing: Text('1.2.0'),
+            trailing: Text('1.0.0'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.privacy_tip),
+            title: Text(_l10n.tr('privacy_policy')),
+            trailing: const Icon(Icons.open_in_new, size: 20),
+            onTap: () => _launchURL('privacy.html'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.description),
+            title: Text(_l10n.tr('terms_of_service')),
+            trailing: const Icon(Icons.open_in_new, size: 20),
+            onTap: () => _launchURL('terms.html'),
           ),
         ],
       ),
     );
   }
+
 
   // ─── セクションタイトル ──────────────────────────────────
   Widget _sectionTitle(String title) {
