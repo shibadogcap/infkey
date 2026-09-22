@@ -28,8 +28,11 @@ void main() async {
 
   // オーディオセッションの設定
   final session = await AudioSession.instance;
+  // 音圧が他アプリ/システム音と競合して絞られないよう、ducking を排除。
+  // iOS は playback（録音は record プラグインが別セッションで自己管理）、
+  // Android は gain（他音に割り込んでも自音量を維持）。
   await session.configure(const AudioSessionConfiguration(
-    avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+    avAudioSessionCategory: AVAudioSessionCategory.playback,
     avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.mixWithOthers,
     avAudioSessionMode: AVAudioSessionMode.defaultMode,
     avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
@@ -39,7 +42,7 @@ void main() async {
       flags: AndroidAudioFlags.none,
       usage: AndroidAudioUsage.game,
     ),
-    androidAudioFocusGainType: AndroidAudioFocusGainType.gainTransientMayDuck,
+    androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
     androidWillPauseWhenDucked: false,
   ));
 

@@ -58,6 +58,12 @@ class L10n {
       'direct_input': '数値を直接入力',
       'privacy_policy': 'プライバシーポリシー',
       'terms_of_service': '利用規約',
+      'waveform': '波形',
+      'waveform_sine': '正弦波',
+      'waveform_triangle': '三角波',
+      'waveform_tip': '音の立ち上がりを滑らかにします（フェードなし）',
+      'octave_eq': 'オクターブEQ',
+      'octave_eq_tip': 'シェパードトーンの各オクターブ(C0〜C9)の音量バランス。全体の音量は自動調整されます',
     },
     'en': {
       'play': 'Play',
@@ -109,6 +115,12 @@ class L10n {
       'direct_input': 'Enter value',
       'privacy_policy': 'Privacy Policy',
       'terms_of_service': 'Terms of Service',
+      'waveform': 'Waveform',
+      'waveform_sine': 'Sine',
+      'waveform_triangle': 'Triangle',
+      'waveform_tip': 'Smooth attack without fading',
+      'octave_eq': 'Octave EQ',
+      'octave_eq_tip': 'Volume balance of each Shepard octave (C0–C9). Overall level auto-adjusts',
     },
   };
 

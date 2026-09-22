@@ -107,6 +107,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
               InfKeyApp.of(context).rebuild();
             },
           ),
+          // 波形選択（正弦波/三角波）
+          _sectionTitle(_l10n.tr('waveform')),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Text(_l10n.tr('waveform_tip'),
+                style: TextStyle(
+                  color: colorScheme.outline,
+                  fontSize: 12,
+                  fontFamily: 'NotoSansJP',
+                )),
+          ),
+          SegmentedButton<int>(
+            segments: [
+              ButtonSegment(
+                value: 0,
+                label: Text(_l10n.tr('waveform_sine')),
+              ),
+              ButtonSegment(
+                value: 1,
+                label: Text(_l10n.tr('waveform_triangle')),
+              ),
+            ],
+            selected: {_settings.waveformType},
+            onSelectionChanged: (Set<int> sel) {
+              setState(() => _settings.waveformType = sel.first);
+              // 次回の音源生成から反映（再生中の声は次回 startVoice から）。
+            },
+          ),
+          const Divider(),
+          // ─── オクターブEQ ─────────────────────────────────
+          _sectionTitle(_l10n.tr('octave_eq')),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Text(_l10n.tr('octave_eq_tip'),
+                style: TextStyle(
+                  color: colorScheme.outline,
+                  fontSize: 12,
+                  fontFamily: 'NotoSansJP',
+                )),
+          ),
+          for (int i = 0; i < 10; i++)
+            _sliderTile(
+              title: 'C$i',
+              icon: Icons.equalizer,
+              value: _settings.octaveEq[i],
+              min: 0.0, max: 2.0, divisions: 20,
+              format: (v) => '${(v * 100).round()}%',
+              onChanged: (v) {
+                final eq = List<double>.from(_settings.octaveEq);
+                eq[i] = v;
+                setState(() => _settings.octaveEq = eq);
+                // 発音中のボイスにも即時反映。
+                _audio.onOctaveEqChanged?.call();
+              },
+            ),
           const Divider(),
           // ─── メトロノーム タイミング ──────────────────────
           _sectionTitle(_l10n.tr('metro_timing')),

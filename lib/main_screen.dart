@@ -28,6 +28,9 @@ class VoiceGroup {
 class _MainScreenState extends State<MainScreen> {
   final AudioEngine _audioEngine = AudioEngine();
   final Map<int, VoiceGroup> _activeGroups = {};
+  // 音源ロード中のポインタと、ロード中に離鍵されたポインタ（競合対策）。
+  final Set<int> _startingPointers = {};
+  final Set<int> _releasedDuringStart = {};
   final _settings = SettingsManager();
   final _l10n = L10n();
   
@@ -65,6 +68,8 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    // オクターブEQ等の設定変更を発音中のボイスへ即時反映する。
+    _audioEngine.onOctaveEqChanged = _updateAllVoices;
     _initAsync();
     _metronomeScreen = const MetronomeScreen();
     _tunerScreen = TunerScreen(isActive: _tunerActive);
@@ -87,6 +92,7 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   void dispose() {
+    _audioEngine.onOctaveEqChanged = null;
     _tunerActive.dispose();
     _audioEngine.dispose();
     super.dispose();
@@ -107,21 +113,43 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _onNoteStart(int pointerId, int note, String type) async {
-    if (_activeGroups.containsKey(pointerId)) return;
+    if (_activeGroups.containsKey(pointerId) || _startingPointers.contains(pointerId)) {
+      return;
+    }
+    _startingPointers.add(pointerId);
 
     // Start voices
     final intervals = _chordMap[type] ?? [0];
-    final double gain = type == 'melody' ? 0.65 : 0.45;
+    // 常時圧縮の問題が解消されたので、本来の音量感を取り戻すため引き上げ。
+    final double gain = type == 'melody' ? 0.75 : 0.6;
 
-    List<ShepardVoice> voices = [];
-    for (final interval in intervals) {
-      final voice = await _audioEngine.startVoice(
-        note + interval,
-        gain,
-        transpose: _settings.transpose.toDouble(),
-        tuning: _settings.tuning.toDouble(),
+    List<ShepardVoice> voices;
+    try {
+      // 和音の各声を並列に起動し、ポインタ単位でアタックを同時に揃える
+      // （直列 await だと各声が数msずれて始まりザラつく原因だった）。
+      voices = await Future.wait(
+        intervals.map(
+          (interval) => _audioEngine.startVoice(
+            note + interval,
+            gain,
+            transpose: _settings.transpose.toDouble(),
+            tuning: _settings.tuning.toDouble(),
+            voiceCount: intervals.length,
+          ),
+        ),
       );
-      voices.add(voice);
+    } catch (e) {
+      _startingPointers.remove(pointerId);
+      return;
+    }
+    _startingPointers.remove(pointerId);
+
+    // ロード中に離鍵されていたら、そのまま破棄して鳴らさない。
+    if (_releasedDuringStart.remove(pointerId)) {
+      for (final voice in voices) {
+        voice.stop();
+      }
+      return;
     }
 
     _activeGroups[pointerId] = VoiceGroup(pointerId, note, type, voices);
@@ -150,6 +178,10 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   void _onNoteEnd(int pointerId) {
+    // まだロード中なら「離鍵済み」として記録し、起動完了時に破棄させる。
+    if (_startingPointers.contains(pointerId)) {
+      _releasedDuringStart.add(pointerId);
+    }
     final group = _activeGroups.remove(pointerId);
     if (group != null) {
       for (final voice in group.voices) {

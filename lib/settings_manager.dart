@@ -62,6 +62,21 @@ class SettingsManager {
   int get colorSeed => _prefs.getInt('colorSeed') ?? 0;
   set colorSeed(int value) => _prefs.setInt('colorSeed', value);
 
+  // Waveform type: 0=sine (正弦波), 1=triangle (三角波)
+  int get waveformType => _prefs.getInt('waveformType') ?? 0;
+  set waveformType(int value) => _prefs.setInt('waveformType', value);
+
+  // Octave EQ: Shepard トーンの各オクターブ(C0〜C9)の音量倍率。
+  // 総エネルギーは audio_engine 側で正規化される相対 EQ として動作する。
+  List<double> get octaveEq {
+    final list = _prefs.getStringList('octaveEq');
+    if (list == null || list.length != 10) return List<double>.filled(10, 1.0);
+    return list.map((e) => double.tryParse(e) ?? 1.0).toList();
+  }
+
+  set octaveEq(List<double> value) => _prefs.setStringList(
+      'octaveEq', value.map((e) => e.toString()).toList());
+
   // Metronome feedback timing offsets (ms, range -20 to +50)
   int get hapticOffsetMs => _prefs.getInt('hapticOffsetMs') ?? 0;
   set hapticOffsetMs(int value) => _prefs.setInt('hapticOffsetMs', value);
